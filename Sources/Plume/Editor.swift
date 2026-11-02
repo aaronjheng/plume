@@ -1,0 +1,1842 @@
+import AppKit
+import SwiftUI
+
+/// Whitespace-visibility mode (Monaco: `renderWhitespace`).
+public enum WhitespaceMode: Equatable, Sendable {
+    /// Nothing drawn.
+    case none
+    /// Every space/tab drawn as a faint middot.
+    case all
+    /// Only trailing whitespace before the line end, drawn as a faint
+    /// middot run (the debug case: invisible tail spaces, \r$).
+    case trailing
+}
+
+/// The generic code editor: a standalone NSTextView pipeline with
+/// incremental tree-sitter highlighting - each keystroke repaints only the
+/// lines the edit (and the parse's changed ranges) touch instead of
+/// re-parsing the whole document.
+///
+/// This is Plume, the shared editor base library. Its files reference nothing outside
+/// the package except `EditorTheme` (the chrome seam each host fills in).
+/// Host integration is injected, not imported:
+/// - syntax via `SyntaxProfile` (package presets or host-defined),
+/// - annotation washes via `annotations` (a host tinting pass),
+/// - completion via the opaque `EditorSuggestControlling` engine,
+/// - formatting via the caller's `formatHandler` (⌥⇧F).
+///
+/// Editor capabilities: a line-number gutter with error diagnostics, a
+/// floating find/replace bar, go-to-line, line operations
+/// (duplicate/delete/move), enter-line indent carry, Tab/Shift-Tab indent
+/// of the selection, bracket/quote auto-pairing with skip-over and
+/// selection wrap, ⌘/ comment toggling per `SyntaxProfile.commentStyle`,
+/// read-only selectable mode, placeholder, auto-grow and fill-container
+/// sizing, plain-text discipline (no rich text, no smart substitutions),
+/// and undo.
+public struct Editor: View {
+    @Binding var text: String
+    /// Annotation provider: given the current text, returns the ranges to
+    /// wash with a background color (a host may pass placeholder tints;
+    /// nil keeps the editor annotation-free). Read fresh on every paint.
+    var annotations: ((String) -> [(NSRange, NSColor)])?
+    /// Change-detector for whole-document re-annotation: when this value
+    /// differs from the previous update (e.g. the host's annotation scope
+    /// changed), the editor re-runs `annotations` over the entire text.
+    var restyleKey: String = ""
+    var syntax: SyntaxProfile = .plain
+    var isEditable: Bool = true
+    /// Stretch to the available height (a full-pane editor) instead of
+    /// growing with the content between the auto-grow bounds.
+    var fillsContainer: Bool = false
+    var showsLineNumbers: Bool = true
+    /// Vertical hairline between the gutter and the text. Off by default -
+    /// the numbers alone read clean against the editor fill.
+    var showsGutterSeparator: Bool = false
+    /// Code typing assists: enter carries indentation (with brace
+    /// expansion), Tab/Shift-Tab indent the selection's lines, ⌘/ toggles
+    /// comments. Off for prose/paste surfaces where those are surprises.
+    var enablesTypingAssist: Bool = true
+    var font: EditorFont = .monoSubheadline
+    var placeholder: String?
+    /// While the editor holds keyboard focus, ⌥⇧F runs its text through
+    /// this handler as one undoable step. Returns the formatted text, nil
+    /// when already formatted, or throws the diagnostic. Read fresh on
+    /// every invocation.
+    var formatHandler: ((String) throws -> String?)?
+    /// Undo-menu label for the ⌥⇧F step ("Format Script", "Format Body").
+    var formatActionName: String = "Format"
+    /// Receives a format handler's diagnostic when ⌥⇧F hits text that does
+    /// not parse (the transient bottom capsule of the caller).
+    var onFormatError: ((String) -> Void)?
+    /// Creates the editor's completion engine, called once per view
+    /// lifetime (the engine outlives SwiftUI re-renders inside the
+    /// coordinator). Nil runs the editor without completion support.
+    var suggestFactory: (() -> any EditorSuggestControlling)?
+    /// Opaque candidate payload forwarded to the engine on every update
+    /// (the engine casts; the editor never inspects it). The host passes
+    /// its current render's candidates so an open popup re-filters live.
+    var suggestItems: [Any] = []
+    /// Cursor/status callback: fired on selection changes and after edits
+    /// with the document's size and the caret's position (1-based line and
+    /// column, matching gutter numbering). Monaco:
+    /// `onDidChangeCursorPosition` plus the document stats status bar.
+    var onStatsChange: ((Editor.Stats) -> Void)?
+    /// Hover content provider: given the character range under the pointer,
+    /// returns the tooltip text (nil = no hover). Monaco:
+    /// `registerHoverProvider`. Diagnostics carry their own tooltips which
+    /// win when both apply; the provider is consulted only off-diagnostics.
+    var hoverProvider: ((_ range: NSRange) -> String?)?
+    /// Bracket/quote auto-pairing (insert the closing character, skip over,
+    /// wrap the selection). Monaco: `autoClosingBrackets` ('always'|'never'
+    /// simplified to a Bool). Off for paste/import surfaces where inserted
+    /// closers are surprises. Independent of `enablesTypingAssist` (indent
+    /// and comments), because pairing alone is what pollutes pastes.
+    var enablesAutoPairing: Bool = true
+    /// Visible-whitespace rendering (Monaco: `renderWhitespace`). Trailing
+    /// covers the debug-gem cases (JSON tail spaces, RESP line endings)
+    /// without the noise of dotting every indent.
+    var renderWhitespace: WhitespaceMode = .none
+
+    /// A point-in-time snapshot of the document's size and caret position.
+    public struct Stats: Equatable, Sendable {
+        /// Total lines (the trailing phantom line counts, like the gutter).
+        public let lines: Int
+        /// Total characters (UTF-16 count, i.e. `string.count`).
+        public let characters: Int
+        /// The caret's 1-based line.
+        public let line: Int
+        /// The caret's 1-based column (in characters).
+        public let column: Int
+    }
+
+    /// Text view insets: the container inset plus the per-fragment padding
+    /// make the text origin - the placeholder overlay matches it exactly.
+    static let textInset = NSSize(width: 6, height: 6)
+    static let fragmentPadding: CGFloat = 5
+
+    /// Auto-grow bounds (fillsContainer = false): the frame grows with the
+    /// content between these bounds. Hosts pick per surface - small fields
+    /// keep a tight cap; code panes should use fillsContainer instead.
+    var autoGrowMinHeight: CGFloat = 40
+    var autoGrowMaxHeight: CGFloat = 96
+
+    @State private var contentHeight: CGFloat = 40
+    /// Live gutter width (line-count digits), synced from updateNSView so
+    /// the placeholder clears the strip.
+    @State private var gutterWidth: CGFloat = 0
+    /// Editor-local find/replace state; the find bar overlays the top edge
+    /// and the coordinator mirrors the query into its match pass.
+    @State private var findState = EditorFindState()
+    @State private var findPendingAction: EditorFindAction?
+    /// Match count + selected index, pushed back from the coordinator.
+    @State private var findCount = 0
+    @State private var findIndex: Int?
+    /// Go-to-line panel (⌥⌘L); mutually exclusive with the find bar.
+    @State private var gotoVisible = false
+    @State private var gotoText = ""
+    @State private var gotoPendingLine: Int?
+    /// Total lines, pushed back for the go-to-line prompt.
+    @State private var lineCountHint = 1
+
+    /// Creates the editor. Every parameter beyond `text` is optional;
+    /// pass only what the host needs (a plain read-write editor is
+    /// `Editor(text: $text)`).
+    public init(
+        text: Binding<String>,
+        annotations: ((String) -> [(NSRange, NSColor)])? = nil,
+        restyleKey: String = "",
+        syntax: SyntaxProfile = .plain,
+        isEditable: Bool = true,
+        fillsContainer: Bool = false,
+        showsLineNumbers: Bool = true,
+        showsGutterSeparator: Bool = false,
+        enablesTypingAssist: Bool = true,
+        font: EditorFont = .monoSubheadline,
+        placeholder: String? = nil,
+        formatHandler: ((String) throws -> String?)? = nil,
+        formatActionName: String = "Format",
+        onFormatError: ((String) -> Void)? = nil,
+        suggestFactory: (() -> any EditorSuggestControlling)? = nil,
+        suggestItems: [Any] = [],
+        onStatsChange: ((Editor.Stats) -> Void)? = nil,
+        hoverProvider: ((_ range: NSRange) -> String?)? = nil,
+        enablesAutoPairing: Bool = true,
+        renderWhitespace: WhitespaceMode = .none,
+        autoGrowMinHeight: CGFloat = 40,
+        autoGrowMaxHeight: CGFloat = 96
+    ) {
+        self._text = text
+        self.annotations = annotations
+        self.restyleKey = restyleKey
+        self.syntax = syntax
+        self.isEditable = isEditable
+        self.fillsContainer = fillsContainer
+        self.autoGrowMinHeight = autoGrowMinHeight
+        self.autoGrowMaxHeight = autoGrowMaxHeight
+        self.showsLineNumbers = showsLineNumbers
+        self.showsGutterSeparator = showsGutterSeparator
+        self.enablesTypingAssist = enablesTypingAssist
+        self.font = font
+        self.placeholder = placeholder
+        self.formatHandler = formatHandler
+        self.formatActionName = formatActionName
+        self.onFormatError = onFormatError
+        self.suggestFactory = suggestFactory
+        self.suggestItems = suggestItems
+        self.onStatsChange = onStatsChange
+        self.hoverProvider = hoverProvider
+        self.enablesAutoPairing = enablesAutoPairing
+        self.renderWhitespace = renderWhitespace
+    }
+
+    public var body: some View {
+        EditorRepresentable(
+            text: $text,
+            annotations: annotations,
+            restyleKey: restyleKey,
+            syntax: syntax,
+            isEditable: isEditable,
+            fillsContainer: fillsContainer,
+            showsLineNumbers: showsLineNumbers,
+            showsGutterSeparator: showsGutterSeparator,
+            enablesTypingAssist: enablesTypingAssist,
+            font: font,
+            formatHandler: formatHandler,
+            formatActionName: formatActionName,
+            onFormatError: onFormatError,
+            suggestFactory: suggestFactory,
+            suggestItems: suggestItems,
+            onStatsChange: onStatsChange,
+            hoverProvider: hoverProvider,
+            enablesAutoPairing: enablesAutoPairing,
+            renderWhitespace: renderWhitespace,
+            onContentHeightChange: fillsContainer
+                ? nil
+                : { newHeight in
+                    // updateNSView runs inside SwiftUI's update transaction,
+                    // where a synchronous @State write is silently dropped.
+                    // Defer one runloop so it applies; ordering is FIFO.
+                    DispatchQueue.main.async { contentHeight = newHeight }
+                },
+            onGutterWidthChange: showsLineNumbers
+                ? { newWidth in
+                    DispatchQueue.main.async { gutterWidth = newWidth }
+                }
+                : nil,
+            find: findState,
+            findAction: findPendingAction,
+            onFindActionHandled: { findPendingAction = nil },
+            findHooks: EditorFindHooks(
+                requested: { selection, replaceMode in
+                    findState.visible = true
+                    findState.replacing = replaceMode
+                    if let selection, !selection.isEmpty { findState.query = selection }
+                    gotoVisible = false
+                },
+                countChanged: { count, index in
+                    findCount = count
+                    findIndex = index
+                },
+                closed: { findState.visible = false },
+                useSelection: { selected in
+                    findState.query = selected
+                },
+                linePanel: {
+                    gotoVisible = true
+                    gotoText = ""
+                    findState.visible = false
+                }
+            ),
+            gotoLine: gotoPendingLine,
+            onGoToLineHandled: { gotoPendingLine = nil },
+            onLineCountHint: { lineCountHint = $0 }
+        )
+        .overlay(alignment: .topTrailing) {
+            if findState.visible {
+                EditorFindBar(
+                    query: $findState.query,
+                    replacement: $findState.replacement,
+                    caseSensitive: $findState.caseSensitive,
+                    replacing: $findState.replacing,
+                    matchCount: findCount,
+                    matchIndex: findIndex,
+                    isEditable: isEditable,
+                    onNext: { findPendingAction = .next },
+                    onPrevious: { findPendingAction = .previous },
+                    onReplace: { findPendingAction = .replaceCurrent },
+                    onReplaceAll: { findPendingAction = .replaceAll },
+                    onClose: { findState.visible = false }
+                )
+                .padding(.trailing, EditorTheme.spaceMedium)
+                .padding(.top, EditorTheme.spaceXSmall)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            if gotoVisible {
+                EditorGoToLineBar(
+                    text: $gotoText,
+                    lineCount: lineCountHint,
+                    onClose: { gotoVisible = false },
+                    onSubmit: {
+                        if let line = Int(gotoText) { gotoPendingLine = line }
+                        gotoVisible = false
+                    }
+                )
+                .padding(.trailing, EditorTheme.spaceMedium)
+                .padding(.top, EditorTheme.spaceXSmall)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .frame(
+            height: fillsContainer
+                ? nil
+                : min(max(contentHeight, autoGrowMinHeight), autoGrowMaxHeight),
+            alignment: .topLeading
+        )
+        .overlay(alignment: .topLeading) {
+            if text.isEmpty, let placeholder, !findState.visible {
+                Text(placeholder)
+                    .font(font.swiftUIFont)
+                    .foregroundStyle(EditorTheme.tertiaryText)
+                    .padding(.leading, Self.textInset.width + Self.fragmentPadding + gutterWidth)
+                    .padding(.top, Self.textInset.height)
+                    .animation(.easeInOut(duration: 0.15), value: gutterWidth)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+// MARK: - AppKit bridge
+
+/// Opaque completion engine attached to a `Editor`. The editor
+/// treats the engine as a black box: it forwards edit/selection/command
+/// traffic and the host's candidate payload, and asks nothing about what
+/// the candidates are. The host bridges its own completion controller
+/// onto this; a host without completion support simply passes no factory.
+@MainActor
+public protocol EditorSuggestControlling: AnyObject {
+    /// The candidate universe changed; the engine re-evaluates an open
+    /// session. The payload is opaque - the engine casts it.
+    func candidatesChanged(_ candidates: [Any])
+    func textChanged(_ textView: NSTextView)
+    func selectionChanged(_ textView: NSTextView)
+    /// Returns true when the selector was consumed by an open session.
+    func handleCommand(_ selector: Selector) -> Bool
+    var isVisible: Bool { get }
+    func hide()
+}
+
+struct EditorRepresentable: NSViewRepresentable {
+    @Binding var text: String
+    let annotations: ((String) -> [(NSRange, NSColor)])?
+    let restyleKey: String
+    let syntax: SyntaxProfile
+    let isEditable: Bool
+    let fillsContainer: Bool
+    let showsLineNumbers: Bool
+    let showsGutterSeparator: Bool
+    let enablesTypingAssist: Bool
+    let font: EditorFont
+    let formatHandler: ((String) throws -> String?)?
+    let formatActionName: String
+    let onFormatError: ((String) -> Void)?
+    let suggestFactory: (() -> any EditorSuggestControlling)?
+    let suggestItems: [Any]
+    let onStatsChange: ((Editor.Stats) -> Void)?
+    let hoverProvider: ((_ range: NSRange) -> String?)?
+    let enablesAutoPairing: Bool
+    let renderWhitespace: WhitespaceMode
+    let onContentHeightChange: ((CGFloat) -> Void)?
+    let onGutterWidthChange: ((CGFloat) -> Void)?
+    let find: EditorFindState
+    let findAction: EditorFindAction?
+    let onFindActionHandled: (() -> Void)?
+    let findHooks: EditorFindHooks?
+    let gotoLine: Int?
+    let onGoToLineHandled: (() -> Void)?
+    let onLineCountHint: ((Int) -> Void)?
+
+    func makeCoordinator() -> EditorCoordinator {
+        EditorCoordinator(self)
+    }
+
+    /// Sizing like the NSScrollView this editor replaced: accept whatever
+    /// the stack proposes (falls back to the constraint-derived fitting
+    /// size only when a dimension is unconstrained). The default NSView
+    /// sizing reports the constraint minimum (gutter width × 0), which
+    /// reads as a zero-ideal editor - VSplitView/VStack then hand the
+    /// pane's spare space to the other rows, which inflate into blank
+    /// bands and squeeze the editor out.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: EditorRootView,
+        context: Context
+    ) -> CGSize? {
+        // fillsContainer promises "accept whatever the stack proposes".
+        // A nil proposal dimension (unbounded axis) must NOT fall back to
+        // fittingSize: the constraint-based root reads near-zero there,
+        // collapsing the editor to invisibility while keyboard focus and
+        // the IME keep working on the zero-sized view. Fall back to the
+        // view's current frame instead - the last real layout.
+        let fitting = nsView.frame.size
+        return CGSize(
+            width: proposal.width ?? max(fitting.width, 400),
+            height: proposal.height ?? max(fitting.height, 200))
+    }
+    func makeNSView(context: Context) -> EditorRootView {
+        let coordinator = context.coordinator
+
+        let textView = EditorTextView()
+        textView.focusRingType = .none
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isEditable = isEditable
+        textView.isSelectable = true
+        textView.drawsBackground = true
+        textView.backgroundColor = EditorTheme.codeBackgroundNS
+        textView.textColor = EditorTheme.textPrimaryNS
+        textView.insertionPointColor = NSColor(EditorTheme.accent)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.smartInsertDeleteEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainerInset = Editor.textInset
+        textView.typingAttributes = [.font: font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS]
+        textView.delegate = coordinator
+        textView.editorCoordinator = coordinator
+        textView.textStorage?.delegate = coordinator
+
+        let scrollView = EditorScrollView()
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.onLayout = { [weak coordinator, weak textView] in
+            // Paint invalidation only. Nothing here may mutate layout
+            // (constraints, frames): this runs inside AppKit's layout pass,
+            // and rescheduling layout from within it can starve the hosting
+            // view's layer commits - the sibling SwiftUI rows around the
+            // editor would blank out while AppKit-drawn content keeps
+            // painting.
+            coordinator?.reportContentHeight(textView)
+            coordinator?.redrawGutter()
+        }
+
+        let root = EditorRootView(
+            textView: textView,
+            scrollView: scrollView,
+            showsGutter: showsLineNumbers)
+        coordinator.rootView = root
+        guard let gutter = root.gutterView else { return root }
+        gutter.textView = textView
+        gutter.showsSeparator = showsGutterSeparator
+        gutter.observeScroll(of: scrollView)
+        gutter.highlighter = coordinator.highlighter
+        gutter.font = font.nsFont
+
+        // Initial fill through the standard pipeline: setting the storage
+        // fires the text-storage delegate, which parses and paints.
+        coordinator.replaceAll(text, in: textView)
+        return root
+    }
+
+    func updateNSView(_ root: EditorRootView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        coordinator.suggest?.candidatesChanged(suggestItems)
+        guard let textView = root.textView else { return }
+        textView.isEditable = isEditable
+
+        // Gutter width lives in the SwiftUI update pass: idempotent, runs
+        // before layout, never re-enters layout from inside it.
+        if let gutter = root.gutterView {
+            gutter.font = font.nsFont
+            let width = gutter.requiredWidth()
+            root.setGutterWidth(width)
+            gutter.needsDisplay = true
+            onGutterWidthChange?(width)
+        }
+
+        if textView.string != text {
+            // IME composition in flight: the storage holds the live marked
+            // string, which the stale binding hasn't seen yet. Replacing
+            // now (setAttributedString outside the IME's edit protocol)
+            // invalidates the marked range and corrupts AppKit's attribute
+            // fix-up state - the next draw throws NSRangeException deep in
+            // ensureAttributesAreFixedInRange. The binding catches up
+            // naturally: the commit fires textDidChange, the next update
+            // sees equal strings, and only genuine external changes
+            // (host switched content) still reach replaceAll.
+            guard !textView.hasMarkedText() else { return }
+            // Just-committed CJK protection: the host may mutate its
+            // binding in the same frame (onChange handlers like a shebang
+            // sync) from a pre-commit snapshot; replaceAll with that
+            // stale value wipes the committed text. The storage is the
+            // truth right after a commit - give the host a beat to catch
+            // up (its own textDidChange already synced the committed
+            // string into the binding, so only genuinely stale writes
+            // race this window).
+            if let last = coordinator.lastCommitTime,
+                Date().timeIntervalSince(last) < 0.25
+            {
+                return
+            }
+            // Editor-owned input (typing, paste, IME commit) already
+            // synced the binding via textDidChange, so lastSyncText ==
+            // textView.string and replaceAll would clobber fresh input with
+            // a stale value. Only genuine external changes (host switched
+            // content) reach here - lastSyncText differs from the live
+            // storage in that case.
+            if coordinator.lastSyncText == textView.string {
+                return
+            }
+            coordinator.replaceAll(text, in: textView)
+        } else if coordinator.lastRestyleKey != restyleKey || coordinator.lastSyntax != syntax {
+            // Annotation scope changed (an environment switch on the host
+            // side) or the syntax profile changed: re-style from scratch.
+            // Rare - the full static pass is fine here.
+            coordinator.lastRestyleKey = restyleKey
+            coordinator.lastSyntax = syntax
+            coordinator.highlighter.setProfile(syntax)
+            coordinator.refreshStyling(in: textView)
+        }
+        if let gutter = root.gutterView {
+            gutter.font = font.nsFont
+        }
+
+        // Find/action/goto pipeline (missing from the original: buttons
+        // and go-to-line actions set state but never executed). Actions are
+        // processed synchronously for immediate feedback; SwiftUI-state
+        // clears are deferred (synchronous writes inside update transactions
+        // are silently dropped) and tracked locally so re-renders don't
+        // re-execute.
+        if let action = findAction, action != coordinator.lastProcessedFindAction {
+            coordinator.performFindAction(action, in: textView)
+            coordinator.lastProcessedFindAction = action
+            DispatchQueue.main.async { onFindActionHandled?() }
+        }
+        if let line = gotoLine, line != coordinator.lastProcessedGotoLine {
+            coordinator.gotoLine = line
+            coordinator.goToLine(line, in: textView)
+            coordinator.lastProcessedGotoLine = line
+            DispatchQueue.main.async { onGoToLineHandled?() }
+        }
+        coordinator.syncFindState(find, in: textView)
+    }
+    static func dismantleNSView(_ root: EditorRootView, coordinator: EditorCoordinator) {
+        coordinator.suggest?.hide()
+    }
+}
+
+/// Root container laying the gutter left of the scroll view with explicit
+/// constraints (no stack view: the gutter width is a live constraint).
+final class EditorRootView: NSView {
+    private(set) weak var textView: NSTextView?
+    private(set) weak var gutterView: EditorGutterView?
+    private let gutterWidthConstraint: NSLayoutConstraint
+
+    init(textView: NSTextView, scrollView: NSScrollView, showsGutter: Bool) {
+        self.textView = textView
+        let gutter = EditorGutterView(frame: .zero)
+        gutterView = gutter
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        gutter.translatesAutoresizingMaskIntoConstraints = false
+        gutterWidthConstraint = gutter.widthAnchor.constraint(equalToConstant: 30)
+        super.init(frame: .zero)
+        addSubview(gutter)
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            gutter.leadingAnchor.constraint(equalTo: leadingAnchor),
+            gutter.topAnchor.constraint(equalTo: topAnchor),
+            gutter.bottomAnchor.constraint(equalTo: bottomAnchor),
+            gutterWidthConstraint,
+            scrollView.leadingAnchor.constraint(equalTo: gutter.trailingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        gutter.isHidden = !showsGutter
+    }
+
+    func setGutterWidth(_ width: CGFloat) {
+        guard let gutterView, !gutterView.isHidden else { return }
+        gutterWidthConstraint.constant = width
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("EditorRootView is created in code only")
+    }
+}
+
+/// NSScrollView that reports layout passes, so the auto-grow editor tracks
+/// content-height changes caused by width changes (window resizes) and the
+/// gutter redraws after rewraps.
+final class EditorScrollView: NSScrollView {
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
+/// NSTextView with the editor's key surfaces: ⌥⇧F formatting (intercepted
+/// in `keyDown` - AppKit routes only Command-carrying events through
+/// `performKeyEquivalent`, so an Option+Shift press would sail past as the
+/// composed character), ⌘/ comment toggling, and bracket/quote smart
+/// insertion in `insertText`.
+final class EditorTextView: NSTextView, NSViewToolTipOwner {
+    weak var editorCoordinator: EditorCoordinator?
+    /// The current-line band's last drawn rect (for targeted invalidation).
+    private var lineBandRect: NSRect = .zero
+    /// The registered tooltip rect's tag + the bounds it covers (re-registered
+    /// when the view grows, so hovers work over newly revealed content).
+    private var tooltipTag: NSView.ToolTipTag?
+    private var tooltipBounds: NSRect = .zero
+
+    /// Selection boundary: clamps out-of-bounds ranges against the LIVE
+    /// storage length before the layout machinery sees them. An
+    /// out-of-bounds selection throws NSRangeException deep inside AppKit's
+    /// caret/scroll computation - and the input system SWALLOWS that
+    /// exception, leaving the text system poisoned (storage edited,
+    /// layout/selection fixup unwound), so every later edit crashes.
+    ///
+    /// Deliberately minimal-intrusion: IME composition (`stillSelecting`,
+    /// marked text) legally uses transient coordinates and is passed
+    /// through untouched; in-bounds selections are handed to super as the
+    /// ORIGINAL objects (no re-encoding); only genuinely out-of-bounds
+    /// final selections get clamped, and the clamp logs once per burst so
+    /// a repeat offender is visible in the log.
+    override func setSelectedRanges(
+        _ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool
+    ) {
+        guard !stillSelecting, !hasMarkedText(), !isFixingSelection else {
+            super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+            return
+        }
+        isFixingSelection = true
+        defer { isFixingSelection = false }
+        let length = (string as NSString).length
+        var clampedAny = false
+        let fixed = ranges.map { value -> NSValue in
+            let range = value.rangeValue
+            // NSNotFound ("no selection") parks the caret at the end.
+            let location =
+                range.location == NSNotFound
+                ? length : min(max(range.location, 0), length)
+            let upperBound =
+                range.location == NSNotFound
+                ? length : min(max(NSMaxRange(range), location), length)
+            if location == range.location, upperBound == NSMaxRange(range) {
+                return value
+            }
+            clampedAny = true
+            return NSValue(range: NSRange(location: location, length: upperBound - location))
+        }
+        if clampedAny {
+            EditorSelectionClampLog.log(length: length, ranges: ranges)
+            super.setSelectedRanges(fixed, affinity: affinity, stillSelecting: stillSelecting)
+        } else {
+            super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        }
+    }
+
+    /// Reentrancy guard: AppKit's own implementation may re-enter the
+    /// public setter during fixups; the inner call must pass through
+    /// un-clamped (its ranges are already in bounds by construction).
+    private var isFixingSelection = false
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let isFormatKey =
+            modifiers == [.option, .shift]
+            && (event.keyCode == 0x03 || event.charactersIgnoringModifiers?.lowercased() == "f")
+        if isFormatKey, window?.firstResponder === self, let editorCoordinator,
+            editorCoordinator.applyFormat(self)
+        {
+            return
+        }
+        // Esc: the completion popup wins; otherwise a visible find bar closes.
+        if event.keyCode == 53, window?.firstResponder === self, let editorCoordinator,
+            editorCoordinator.suggest?.isVisible != true, editorCoordinator.parent.find.visible
+        {
+            editorCoordinator.closeFind(in: self)
+            return
+        }
+        // ⌘⌫: delete to the logical line's start (a selection keeps the
+        // platform's delete-selection behavior).
+        if modifiers == [.command], event.keyCode == 51,
+            window?.firstResponder === self, selectedRange().length == 0,
+            let editorCoordinator
+        {
+            editorCoordinator.deleteToLogicalLineStart(in: self)
+            return
+        }
+        // Right arrow: jump past a closing bracket/quote when the caret
+        // sits right before it, so the paired character does not trap the
+        // caret between the pair.
+        if event.keyCode == 124, selectedRange().length == 0, !string.isEmpty {
+            let caret = selectedRange().location
+            let text = string as NSString
+            if caret < text.length {
+                let char = codeEditorChar(text, caret)
+                if ")]}".contains(char ?? " ") || char == "\"" || char == "'" || char == "`" {
+                    let newLocation = min(caret + 1, text.length)
+                    setSelectedRange(NSRange(location: newLocation, length: 0))
+                    scrollRangeToVisible(NSRange(location: newLocation, length: 0))
+                    return
+                }
+            }
+        }
+        isTypingKeystroke = true
+        defer { isTypingKeystroke = false }
+        super.keyDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard window?.firstResponder === self, let coordinator = editorCoordinator else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "/" {
+            if coordinator.toggleComment(self) { return true }
+            return super.performKeyEquivalent(with: event)
+        }
+        guard isEditable || Self.isNavigationEquivalent(event: event, modifiers: modifiers) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "f" {
+            coordinator.requestFind(replaceMode: false, in: self)
+            return true
+        }
+        if modifiers == [.command, .option], event.charactersIgnoringModifiers == "f" {
+            coordinator.requestFind(replaceMode: true, in: self)
+            return true
+        }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "g" {
+            coordinator.performFindAction(.next, in: self)
+            return true
+        }
+        if modifiers == [.command, .shift], event.charactersIgnoringModifiers == "g" {
+            coordinator.performFindAction(.previous, in: self)
+            return true
+        }
+        if modifiers == [.command, .shift], event.keyCode == 43 {
+            coordinator.jumpToMatchingBracket(in: self)
+            return true
+        }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "d" {
+            coordinator.duplicateLines(in: self)
+            return true
+        }
+        if modifiers == [.command, .shift], event.charactersIgnoringModifiers == "k" {
+            coordinator.deleteLines(in: self)
+            return true
+        }
+        if modifiers == [.command, .control], event.keyCode == 126 {
+            coordinator.moveLines(in: self, up: true)
+            return true
+        }
+        if modifiers == [.command, .control], event.keyCode == 125 {
+            coordinator.moveLines(in: self, up: false)
+            return true
+        }
+        if modifiers == [.command, .option], event.charactersIgnoringModifiers == "l" {
+            coordinator.requestLinePanel(in: self)
+            return true
+        }
+        if modifiers == [.command, .option], event.charactersIgnoringModifiers == "e" {
+            coordinator.useSelectionForFind(in: self)
+            return true
+        }
+        if modifiers == [.command, .option, .shift], event.charactersIgnoringModifiers == "v" {
+            coordinator.pasteAndFormat(in: self)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Navigation equivalents (⌘F/⌘G and friends) stay live in read-only
+    /// editors; editing ones do not.
+    private static func isNavigationEquivalent(event: NSEvent, modifiers: NSEvent.ModifierFlags) -> Bool {
+        if modifiers == [.command], ["f", "g"].contains(event.charactersIgnoringModifiers ?? "") {
+            return true
+        }
+        if modifiers == [.command, .option], event.charactersIgnoringModifiers == "f" {
+            return true
+        }
+        if modifiers == [.command, .shift], event.charactersIgnoringModifiers == "g" {
+            return true
+        }
+        return false
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerTooltipRect()
+    }
+
+    override func layout() {
+        super.layout()
+        registerTooltipRect()
+    }
+
+    /// One tooltip rect covering the view; re-registered when the bounds
+    /// grow (the owner hit-tests by point, so the rect just needs to cover
+    /// the area the mouse can be in).
+    private func registerTooltipRect() {
+        guard window != nil, bounds != tooltipBounds else { return }
+        if let tooltipTag { removeToolTip(tooltipTag) }
+        tooltipBounds = bounds
+        tooltipTag = addToolTip(bounds, owner: self, userData: nil)
+    }
+
+    /// Hover over an error squiggle: the diagnostic with its line/column.
+    func view(
+        _ view: NSView,
+        stringForToolTip tag: NSView.ToolTipTag,
+        point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        guard let coordinator = editorCoordinator, let layoutManager, let textContainer else { return "" }
+        let characterIndex = layoutManager.characterIndex(for: point, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
+        // Diagnostics win: the syntax error's own tooltip takes precedence
+        // over any host hover on the same token.
+        for (index, range) in coordinator.diagnosticRanges.enumerated()
+        where NSLocationInRange(characterIndex, range) {
+            let position = coordinator.highlighter.lineAndColumn(ofUTF16Offset: range.location)
+            let message =
+                index < coordinator.diagnosticMessages.count
+                ? coordinator.diagnosticMessages[index] : "Syntax error"
+            return "\(message) (line \(position.line), column \(position.column))"
+        }
+        // Host hover provider: consult on the range under the pointer.
+        if let hoverProvider = coordinator.parent.hoverProvider, characterIndex < nsStringLength {
+            let tokenRange = hoverRange(at: characterIndex)
+            if let text = hoverProvider(tokenRange) { return text }
+        }
+        return ""
+    }
+
+    /// The word-ish range under `characterIndex` for hover purposes: expands
+    /// over identifier characters ([A-Za-z0-9_-]) so hosts receive a stable
+    /// token range rather than the pointer's exact offset.
+    private func hoverRange(at index: Int) -> NSRange {
+        let ns = string as NSString
+        guard index < ns.length else { return NSRange(location: index, length: 0) }
+        let identifier = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        var start = index
+        while start > 0 {
+            let previous = ns.substring(with: NSRange(location: start - 1, length: 1))
+            guard previous.rangeOfCharacter(from: identifier) != nil else { break }
+            start -= 1
+        }
+        var end = index + 1
+        while end < ns.length {
+            let next = ns.substring(with: NSRange(location: end, length: 1))
+            guard next.rangeOfCharacter(from: identifier) != nil else { break }
+            end += 1
+        }
+        return NSRange(location: start, length: end - start)
+    }
+
+    private var nsStringLength: Int { (string as NSString).length }
+
+    /// The band behind the caret's line, drawn before the text (the view's
+    /// background is transparent, so the fill shows through).
+    /// Diagnostic switch (host-settable): skip all custom draw work and
+    /// go straight to super - isolates whether the custom draw pass
+    /// interferes with text rendering.
+
+    override func draw(_ dirtyRect: NSRect) {
+        if EditorTheme.debugDisableCustomDrawing {
+            super.draw(dirtyRect)
+            return
+        }
+        super.draw(dirtyRect)
+    }
+
+    /// Whitespace markers (Monaco: `renderWhitespace`): faint middots on
+    /// every space/tab (`.all`) or only on the trailing run before each
+    /// line's end (`.trailing`). Pure draw-layer work over the visible
+    /// glyph range - no storage, no parse involvement.
+    private func drawWhitespace(dirtyRect: NSRect) {
+        let mode = editorCoordinator?.parent.renderWhitespace ?? .none
+        guard mode != .none, let layoutManager, let container = textContainer,
+            !string.isEmpty
+        else { return }
+        let ns = string as NSString
+        let length = ns.length
+        let bounding = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
+        let markerColor = EditorTheme.textPrimaryNS.withAlphaComponent(0.18)
+        markerColor.setFill()
+        var index = glyphRange.location
+        let end = NSMaxRange(glyphRange)
+        while index < end {
+            var fragmentGlyphs = NSRange()
+            let lineFragment = layoutManager.lineFragmentRect(forGlyphAt: index, effectiveRange: &fragmentGlyphs)
+            let charRange = layoutManager.characterRange(forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+            // Same layout-transient clamp as drawIndentGuides.
+            guard charRange.location < length else { break }
+            let clamped = NSRange(
+                location: charRange.location,
+                length: min(charRange.length, length - charRange.location))
+            guard clamped.length > 0 else { break }
+            let line = ns.substring(with: clamped) as NSString
+            // Where the trailing run starts in this fragment (for .trailing).
+            var trailingStart = line.length
+            if mode == .trailing {
+                while trailingStart > 0 {
+                    let unit = line.substring(with: NSRange(location: trailingStart - 1, length: 1))
+                    guard unit == " " || unit == "\t" else { break }
+                    trailingStart -= 1
+                }
+            }
+            var offset = charRange.location
+            for position in 0..<line.length {
+                defer { offset += 1 }
+                let unit = line.substring(with: NSRange(location: position, length: 1))
+                guard unit == " " || unit == "\t" else { continue }
+                if mode == .trailing, offset - charRange.location < trailingStart { continue }
+                // Proportional position within the fragment: monospace font,
+                // so character fraction == x fraction (good enough for a
+                // 2pt marker; avoids per-glyph lookup churn).
+                let fraction = CGFloat(offset - charRange.location) / CGFloat(max(line.length, 1))
+                let marker = CGRect(
+                    x: lineFragment.minX + textContainerOrigin.x + fraction * lineFragment.width,
+                    y: lineFragment.minY + textContainerOrigin.y + lineFragment.height / 2 - 1,
+                    width: 2,
+                    height: 2)
+                marker.fill()
+            }
+            index = NSMaxRange(fragmentGlyphs)
+        }
+    }
+
+    /// Faint vertical guides at every indent level of each visible line
+    /// fragment (the project's 2-space unit). Drawn under the text; wrapped
+    /// continuations carry no leading whitespace and get none.
+    private func drawIndentGuides(dirtyRect: NSRect) {
+        guard let layoutManager = layoutManager, let container = textContainer,
+            !string.isEmpty
+        else { return }
+        let nsString = string as NSString
+        let length = nsString.length
+        let unitWidth = ("  " as NSString).size(withAttributes: [.font: font as Any]).width
+        guard unitWidth > 0 else { return }
+        let bounding = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
+        let guideColor = EditorTheme.textPrimaryNS.withAlphaComponent(0.12)
+        guideColor.setFill()
+        var index = glyphRange.location
+        let end = NSMaxRange(glyphRange)
+        while index < end {
+            var fragmentGlyphs = NSRange()
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: index, effectiveRange: &fragmentGlyphs)
+            let charRange = layoutManager.characterRange(forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+            // Layout transients (IME composition relayouts) can hand back
+            // character ranges past the live storage - substring on those
+            // throws, and a draw pass must never crash the app.
+            guard charRange.location < length else { break }
+            let clamped = NSRange(
+                location: charRange.location,
+                length: min(charRange.length, length - charRange.location))
+            guard clamped.length > 0 else { break }
+            let leading = nsString.substring(with: clamped).prefix { $0 == " " }.count
+            let level = leading / 2
+            if level > 0 {
+                let baseX = fragment.minX + textContainerOrigin.x + Editor.fragmentPadding
+                for levelIndex in 0..<min(level, 12) {
+                    NSRect(
+                        x: baseX + CGFloat(levelIndex) * unitWidth,
+                        y: fragment.minY + textContainerOrigin.y,
+                        width: 1,
+                        height: fragment.height
+                    ).fill()
+                }
+            }
+            index = NSMaxRange(fragmentGlyphs)
+        }
+    }
+
+    /// Recomputes the caret line's band and invalidates the old and new
+    /// rects. Called on selection changes and after edits.
+    func refreshLineBand() {
+        let previous = lineBandRect
+        lineBandRect = Self.computeLineBand(for: self)
+        if previous != lineBandRect {
+            setNeedsDisplay(previous.insetBy(dx: -2, dy: -2))
+            setNeedsDisplay(lineBandRect.insetBy(dx: -2, dy: -2))
+        }
+    }
+
+    private static func computeLineBand(for textView: NSTextView) -> NSRect {
+        guard let layoutManager = textView.layoutManager,
+            !textView.string.isEmpty
+        else { return .zero }
+        let length = (textView.string as NSString).length
+        let caret = min(textView.selectedRange().location, length)
+        let charRange = (textView.string as NSString).lineRange(for: NSRange(location: caret, length: 0))
+        guard charRange.length > 0 else { return .zero }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+        var band = NSRect.zero
+        var first = true
+        var index = glyphRange.location
+        let end = NSMaxRange(glyphRange)
+        while index < end {
+            var fragmentGlyphs = NSRange()
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: index, effectiveRange: &fragmentGlyphs)
+            // Fragment rects live in the container's coordinates.
+            let viewRect = fragment.offsetBy(
+                dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+            band = first ? viewRect : band.union(viewRect)
+            first = false
+            index = NSMaxRange(fragmentGlyphs)
+        }
+        return band
+    }
+
+    // MARK: Context menu
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        guard let coordinator = editorCoordinator else { return menu }
+        let editable = isEditable
+
+        func item(_ title: String, _ key: String, _ mask: NSEvent.ModifierFlags, _ action: Selector, _ enabled: Bool) {
+            let menuItem = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            menuItem.keyEquivalentModifierMask = mask
+            menuItem.target = self
+            menuItem.isEnabled = enabled
+            menu.addItem(menuItem)
+        }
+
+        menu.addItem(.separator())
+        item("Format", "f", [.option, .shift], #selector(menuFormat), editable && coordinator.canFormat(self))
+        item("Toggle Comment", "/", [.command], #selector(menuToggleComment), editable && coordinator.supportsComments)
+        menu.addItem(.separator())
+        item("Duplicate Lines", "d", [.command], #selector(menuDuplicateLines), editable)
+        item("Delete Lines", "k", [.command, .shift], #selector(menuDeleteLines), editable)
+        let upKey = String(UnicodeScalar(NSUpArrowFunctionKey) ?? "?")
+        let downKey = String(UnicodeScalar(NSDownArrowFunctionKey) ?? "?")
+        item("Move Line Up", upKey, [.control, .command], #selector(menuMoveLinesUp), editable)
+        item("Move Line Down", downKey, [.control, .command], #selector(menuMoveLinesDown), editable)
+        menu.addItem(.separator())
+        item("Paste and Format", "v", [.command, .option, .shift], #selector(menuPasteAndFormat), editable && coordinator.canFormat(self))
+        item("Go to Line…", "l", [.command, .option], #selector(menuGoToLine), true)
+        item("Use Selection for Find", "e", [.command, .option], #selector(menuUseSelectionForFind), selectedRange().length > 0)
+        return menu
+    }
+
+    @objc private func menuFormat() { _ = editorCoordinator?.applyFormat(self) }
+    @objc private func menuToggleComment() { _ = editorCoordinator?.toggleComment(self) }
+    @objc private func menuDuplicateLines() { editorCoordinator?.duplicateLines(in: self) }
+    @objc private func menuDeleteLines() { editorCoordinator?.deleteLines(in: self) }
+    @objc private func menuMoveLinesUp() { editorCoordinator?.moveLines(in: self, up: true) }
+    @objc private func menuMoveLinesDown() { editorCoordinator?.moveLines(in: self, up: false) }
+    @objc private func menuFind() { editorCoordinator?.requestFind(replaceMode: false, in: self) }
+    @objc private func menuPasteAndFormat() { editorCoordinator?.pasteAndFormat(in: self) }
+    @objc private func menuGoToLine() { editorCoordinator?.requestLinePanel(in: self) }
+    @objc private func menuUseSelectionForFind() { editorCoordinator?.useSelectionForFind(in: self) }
+
+    /// True only while `keyDown` is on the stack (see its override).
+    /// IME commits arrive through TSM callbacks outside any keyDown, so
+    /// they never see this flag - pairing never touches composed text,
+    /// whatever replacementRange the input method passes.
+    private var isTypingKeystroke = false
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        // Smart pairs only for a single plain character synchronously
+        // driven by a physical keystroke; everything else (paste,
+        // completion acceptance, IME commits, attributed strings) takes
+        // the standard path untouched.
+        guard isTypingKeystroke,
+            let coordinator = editorCoordinator,
+            let string = insertString as? String,
+            string.count == 1, let character = string.first,
+            replacementRange.location == NSNotFound
+        else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+        if coordinator.handleTypedCharacter(character, in: self) {
+            return
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
+    }
+}
+
+// MARK: - Coordinator
+
+@MainActor
+final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
+    var parent: EditorRepresentable
+    fileprivate let suggest: (any EditorSuggestControlling)?
+    let highlighter: SourceHighlighter
+    fileprivate var lastRestyleKey: String
+    fileprivate var lastSyntax: SyntaxProfile
+    weak var rootView: EditorRootView?
+    private var lastReportedHeight: CGFloat = 0
+    /// Editor-local find state: all matches of the active query, the
+    /// selected one, and the last mirrored find state (for diffing).
+    var findMatches: [NSRange] = []
+    var findCurrentIndex: Int?
+    var lastFindState: EditorFindState?
+    /// The currently highlighted bracket pair (temporary attributes).
+    var bracketHighlightRanges: [NSRange] = []
+    /// The currently washed word-occurrence ranges (temporary attributes).
+    var wordHighlightRanges: [NSRange] = []
+    /// The currently dashed error-underline ranges (temporary attributes).
+    var diagnosticUnderlineRanges: [NSRange] = []
+    /// The live diagnostics behind the underlines: range, message, and the
+    /// 1-based line (parallel to `diagnosticUnderlineRanges`).
+    var diagnosticRanges: [NSRange] = []
+    var diagnosticMessages: [String] = []
+    var diagnosticLines: [Int] = []
+    /// The pending go-to-line number (nil = nothing queued).
+    var gotoLine: Int?
+    /// The last reported stats, so repeated identical reports are dropped.
+    private var lastStats: Editor.Stats?
+
+    /// Reports document size + caret position (Monaco:
+    /// onDidChangeCursorPosition). Zero new computation: reads the
+    /// highlighter's line ledger that the gutter already maintains.
+    func reportStats(in textView: NSTextView) {
+        guard let onStatsChange = parent.onStatsChange else { return }
+        let ns = textView.string as NSString
+        let caret = min(textView.selectedRange().location, ns.length)
+        let line = highlighter.lineNumber(ofUTF16Offset: caret)
+        let lineStart = highlighter.lineStartOffsets[max(0, line - 1)]
+        let stats = Editor.Stats(
+            lines: highlighter.lineCount,
+            characters: ns.length,
+            line: line,
+            column: caret - lineStart + 1)
+        guard stats != lastStats else { return }
+        lastStats = stats
+        onStatsChange(stats)
+    }
+    /// Last processed find/goto actions so synchronous SwiftUI-state
+    /// clears (dropped inside update transactions) do not re-trigger.
+    fileprivate var lastProcessedFindAction: EditorFindAction?
+    /// The moment of the last storage edit (IME commit protection in
+    /// updateNSView's replaceAll branch).
+    var lastCommitTime: Date?
+    /// Whether the most recent storage edit inserted non-ASCII (from the
+    /// storage delegate's edited range) - gates the post-commit full restyle
+    /// that regenerates zero-advance CJK glyphs.
+    var lastEditHadNonASCII = false
+    fileprivate var lastProcessedGotoLine: Int?
+    var lastLineCountHint = 1
+    /// The character index the diagnostic tooltip last resolved (dedupes
+    /// provider calls on the same token).
+    var lastHoverIndex: Int?
+
+    /// The last text value synced from the editor's own input (typing,
+    /// paste, IME commit). updateNSView skips replaceAll when the binding
+    /// matches this, because that means the change came from the editor
+    /// itself - not an external host update that needs to be pushed down.
+    var lastSyncText: String?
+
+    init(_ parent: EditorRepresentable) {
+        self.parent = parent
+        self.suggest = parent.suggestFactory?()
+        self.lastRestyleKey = parent.restyleKey
+        self.lastSyntax = parent.syntax
+        self.highlighter = SourceHighlighter(profile: parent.syntax)
+        super.init()
+    }
+
+    // MARK: Text view delegate
+
+    func textDidChange(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView else { return }
+        lastCommitTime = Date()
+        // Non-ASCII COMMIT (CJK IME): glyphs generated during the IME's
+        // edit window come out zero-advance (the run squeezed into a
+        // sliver, drawing nothing). After the composition is fully torn
+        // down, rewriting the storage's attributes invalidates those
+        // glyphs; the next layout regenerates them with a proper cascade.
+        // The flag comes from the storage delegate's edit range, so plain
+        // ASCII typing never pays for a full restyle.
+        // Non-ASCII COMMIT (CJK IME): glyphs generated during the IME's
+        // edit window can come out zero-advance (the run squeezed into a
+        // sliver, drawing nothing). After the composition is fully torn
+        // down, rewriting the storage's attributes invalidates those
+        // glyphs; the next layout regenerates them with a proper cascade.
+        // NEVER during composition: touching the marked range's attributes
+        // mid-composition makes the input system re-anchor and reabsorb
+        // freshly committed text (committed characters vanish until the
+        // next commit). The flag comes from the storage delegate's edit
+        // range, so plain ASCII typing never pays for a full restyle.
+        if lastEditHadNonASCII, !textView.hasMarkedText() {
+            lastEditHadNonASCII = false
+            refreshStyling(in: textView)
+        }
+        parent.text = textView.string
+        lastSyncText = textView.string
+        // Suggest stays live during IME (candidate refilters are harmless);
+        // bracket/word highlights write temporary attributes that would
+        // fight the composition's own marked-range styling, so they wait.
+        suggest?.textChanged(textView)
+        reportContentHeight(textView)
+        invalidateGutter()
+        (textView as? EditorTextView)?.refreshLineBand()
+        guard !textView.hasMarkedText() else { return }
+        updateBracketHighlight(in: textView)
+        updateWordHighlight(in: textView)
+        // IME commit: the caret just moved to the committed text, which
+        // may sit below the visible area (long document, fillsContainer).
+        // AppKit's implicit scroll doesn't fire for the NSNotFound
+        // replacement path - scroll explicitly.
+        textView.scrollRangeToVisible(textView.selectedRange())
+    }
+
+    /// Caret moves (arrow keys, clicks): keep an open popup glued to the
+    /// caret, refresh the current-line band and the bracket-pair highlight.
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView else { return }
+        suggest?.selectionChanged(textView)
+        reportStats(in: textView)
+        (textView as? EditorTextView)?.refreshLineBand()
+        updateBracketHighlight(in: textView)
+        updateWordHighlight(in: textView)
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if suggest?.handleCommand(commandSelector) == true { return true }
+        // Typing assists are gated: prose/paste surfaces keep the platform
+        // defaults (plain newline, tab character, no comment toggle).
+        guard parent.enablesTypingAssist else { return false }
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            insertNewlineWithIndent(textView)
+            return true
+        case #selector(NSResponder.insertTab(_:)):
+            indentSelection(textView, outdent: false)
+            return true
+        case #selector(NSResponder.insertBacktab(_:)):
+            indentSelection(textView, outdent: true)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        suggest?.hide()
+    }
+
+    // MARK: Paint pipeline (text-storage delegate)
+
+    /// Single restyle funnel: every character edit - typing, paste, the
+    /// smart-edit helpers, external replaces - lands here with the precise
+    /// edited range. The highlighter folds the edit into its parse tree and
+    /// returns the repaint window (edited lines ∪ the parse's changed
+    /// ranges, line-aligned); this sets base attributes on the window and
+    /// layers the syntax runs and the host's annotation washes that
+    /// intersect it.
+    func textStorage(
+        _ textStorage: NSTextStorage,
+        didProcessEditing editedMask: NSTextStorageEditActions,
+        range editedRange: NSRange,
+        changeInLength delta: Int
+    ) {
+        // Only character edits enter the pipeline; the attribute writes
+        // below re-enter with .editedAttributes and must fall through.
+        guard editedMask.contains(.editedCharacters) else { return }
+        let text = textStorage.string
+        let length = (text as NSString).length
+        let result = highlighter.edit(text, editedRange: editedRange, delta: delta)
+
+        // IME COMPOSITION: rewrite NOTHING. Any attribute write here (the
+        // paint funnel covers the whole edited line, including previously
+        // committed CJK on it) invalidates glyphs and regenerates them
+        // inside the IME's edit window - where font cascade fails and CJK
+        // comes out zero-advance (committed characters visually vanish
+        // until the next commit's restyle). The parse tree above stays in
+        // sync; styling catches up at the commit (textDidChange's full
+        // restyle for non-ASCII edits, the normal funnel otherwise). The
+        // marked pinyin itself carries typing attributes from the input
+        // system and renders fine untouched.
+        if let textView = rootView?.textView, textView.hasMarkedText() {
+            invalidateGutter()
+            return
+        }
+
+        // Annotation ranges come from the host's provider; any that touch
+        // the window pull the window out to cover them whole, so a
+        // multi-line annotation never ends up half-restyled.
+        let tintRanges = parent.annotations?(text) ?? []
+        var window = result.window
+        for (range, _) in tintRanges where NSIntersectionRange(range, window).length > 0 {
+            window = window.union(range)
+        }
+        guard let clampedWindow = window.clamped(to: length), clampedWindow.length > 0 else {
+            return
+        }
+
+        // Flag for the post-commit restyle (textDidChange): the writes BELOW
+        // invalidate glyphs and NSLayoutManager regenerates them
+        // synchronously inside this edit transaction - where the font
+        // cascade fails and CJK comes out zero-advance (the whole line
+        // visually vanishes). textDidChange must re-style whenever the
+        // rewritten window contains non-ASCII. The window, not the edit
+        // range: a DELETION's edited range is empty (nothing occupies it
+        // anymore), but the line it shrank still holds the CJK whose
+        // glyphs the rewrite just broke. Scanned over one line, O(line).
+        lastEditHadNonASCII = false
+        let windowText = (text as NSString).substring(with: clampedWindow)
+        for unit in windowText.utf16 where unit > 127 {
+            lastEditHadNonASCII = true
+            break
+        }
+
+        // Base attributes reset the window (inserted characters arrive
+        // unattributed; pasted runs shed their fonts via isRichText=false,
+        // and this normalizes anything else).
+        textStorage.setAttributes(
+            [.font: parent.font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS],
+            range: clampedWindow)
+        if let runs = result.runs {
+            for (range, color) in runs {
+                let intersection = NSIntersectionRange(range, clampedWindow)
+                guard intersection.length > 0 else { continue }
+                textStorage.addAttribute(.foregroundColor, value: color, range: intersection)
+            }
+        }
+        for (range, color) in tintRanges {
+            let intersection = NSIntersectionRange(range, clampedWindow)
+            guard intersection.length > 0 else { continue }
+            textStorage.addAttribute(
+                .backgroundColor,
+                value: color,
+                range: intersection)
+        }
+        invalidateGutter()
+        // Temporary attributes (diagnostics, find washes) translate
+        // character ranges against the layout manager - which still holds
+        // the PRE-edit layout while we are inside processEditing. During
+        // that window any range can exceed the stale glyph count and throw
+        // NSRangeException inside NSLayoutManager. Defer to the next
+        // runloop turn: layout has run, the mapping is valid again.
+        if let textView = rootView?.textView {
+            let hasFind = parent.find.visible
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, textView.window != nil else { return }
+                self.refreshDiagnostics(in: textView)
+                if hasFind {
+                    self.refreshFindHighlights(in: textView)
+                }
+            }
+        }
+    }
+
+    /// Full restyle for scope/kind switches (rare): the shared static
+    /// one-shot walk over the whole text.
+    func refreshStyling(in textView: NSTextView) {
+        guard let storage = textView.textStorage else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        storage.setAttributes(
+            [.font: parent.font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS],
+            range: full)
+        if let runs = SyntaxHighlight.foregroundRuns(in: storage.string, profile: parent.syntax) {
+            for (range, color) in runs {
+                storage.addAttribute(.foregroundColor, value: color, range: range)
+            }
+        }
+        for (range, color) in parent.annotations?(storage.string) ?? [] {
+            storage.addAttribute(
+                .backgroundColor,
+                value: color,
+                range: range)
+        }
+    }
+
+    /// External replace: swap the whole content through the standard
+    /// pipeline (the storage delegate repaints), keep the caret when it
+    /// still fits, retire the popup, refresh the height report.
+    func replaceAll(_ text: String, in textView: NSTextView) {
+        suggest?.hide()
+        let selection = textView.selectedRange()
+        guard let storage = textView.textStorage else { return }
+        storage.setAttributedString(
+            NSAttributedString(
+                string: text,
+                attributes: [
+                    .font: parent.font.nsFont,
+                    .foregroundColor: EditorTheme.textPrimaryNS,
+                ]))
+        // Clamp against the storage's LIVE post-edit length, not the
+        // parameter's: any drift between the two (a failed or partial set,
+        // an observer that mutated the storage) must not produce an
+        // out-of-bounds selection - AppKit computes the caret's blink rect
+        // inside setSelectedRange and throws NSRangeException on OOB.
+        let length = storage.length
+        let caret = selection.location == NSNotFound ? length : min(max(selection.location, 0), length)
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        lastRestyleKey = parent.restyleKey
+        lastSyntax = parent.syntax
+        reportStats(in: textView)
+        reportContentHeight(textView)
+        invalidateGutter()
+    }
+
+    func reportContentHeight(_ textView: NSTextView?) {
+        guard let textView, let onContentHeightChange = parent.onContentHeightChange,
+            let layoutManager = textView.layoutManager,
+            let container = textView.textContainer
+        else { return }
+        // NSLayoutManager lays out lazily, only as far as the visible clip:
+        // reading usedRect without forcing layout reports the CURRENT clip,
+        // and the auto-grow loop then deadlocks at its starting height
+        // (bigger clip → more laid out → bigger report → ... never starts).
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+        let height = ceil(used.height + textView.textContainerInset.height * 2)
+        guard abs(height - lastReportedHeight) > 0.5 else { return }
+        lastReportedHeight = height
+        onContentHeightChange(height)
+    }
+
+    func invalidateGutter() {
+        // Paint invalidation only - see the onLayout note: constraint or
+        // frame changes from here (storage edits fire inside SwiftUI's
+        // makeNSView/updateNSView transactions) would reschedule layout
+        // mid-transaction and blank sibling SwiftUI rows.
+        redrawGutter()
+    }
+
+    func redrawGutter() {
+        guard let gutter = rootView?.gutterView else { return }
+        gutter.needsDisplay = true
+    }
+
+    // MARK: ⌥⇧F formatting
+
+    /// Runs the caller's handler over the text as one undoable step.
+    /// Returns false when no handler is installed (the key falls through).
+    func applyFormat(_ textView: NSTextView) -> Bool {
+        guard textView.isEditable, let formatHandler = parent.formatHandler else { return false }
+        do {
+            guard let formatted = try formatHandler(textView.string) else { return true }
+            let caret = textView.selectedRange().location
+            let sourceRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            // Registers the undo entry, then the storage edit funnels the
+            // replacement through the repaint pipeline via didChangeText.
+            guard textView.shouldChangeText(in: sourceRange, replacementString: formatted) else {
+                return true
+            }
+            textView.textStorage?.replaceCharacters(in: sourceRange, with: formatted)
+            textView.didChangeText()
+            let formattedLength = (formatted as NSString).length
+            textView.setSelectedRange(NSRange(location: min(caret, formattedLength), length: 0))
+            textView.undoManager?.setActionName(parent.formatActionName)
+            // Brief visual feedback for successful formatting.
+            let originalColor = textView.insertionPointColor
+            textView.insertionPointColor = NSColor(EditorTheme.success)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                textView.insertionPointColor = originalColor
+            }
+            return true
+        } catch let error as TextFormatError {
+            parent.onFormatError?(error.message)
+            return true
+        } catch {
+            parent.onFormatError?("Unexpected token")
+            return true
+        }
+    }
+
+    // MARK: Smart editing
+
+    private static let indentUnit = "  "
+    /// Opening characters that auto-close, and quote characters that pair.
+    /// `{` deliberately never pairs: in an API client every brace is either
+    /// a JSON delimiter or the `{{template}}` opener, and pairing it eats
+    /// the `{{` sequence the completion popup needs to trigger.
+    private static let openers: [Character: Character] = [
+        "(": ")", "[": "]", "\"": "\"", "'": "'", "`": "`",
+    ]
+    /// Characters skipped over instead of typed when the caret sits right
+    /// before them.
+    private static let skippers: Set<Character> = [")", "]", "}", "\"", "'", "`"]
+
+    /// Bracket/quote smart insertion for a typed character. Consumes the
+    /// keystroke (true) for skip-over, pairing, and selection wrap;
+    /// anything else falls through to the standard insertion.
+    func handleTypedCharacter(_ character: Character, in textView: NSTextView) -> Bool {
+        guard parent.enablesAutoPairing else { return false }
+        guard textView.isEditable, !textView.hasMarkedText() else { return false }
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        let caret = selection.location
+
+        // Skip-over: the matching character is already at the caret.
+        if Self.skippers.contains(character), caret < text.length,
+            char(text, caret) == character
+        {
+            textView.setSelectedRange(NSRange(location: caret + 1, length: 0))
+            return true
+        }
+
+        guard let closer = Self.openers[character] else { return false }
+
+        // Quotes never pair in the middle of a word (apostrophes: it's).
+        if character == "\"" || character == "'" || character == "`", caret > 0 {
+            let previous = char(text, caret - 1)
+            if let previous, previous.isLetter || previous.isNumber { return false }
+        }
+
+        let next = char(text, caret)
+        let nextIsBoundary = next == nil || next?.isWhitespace == true || next.map(Self.skippers.contains) == true
+
+        if selection.length > 0 {
+            // Wrap the selection in the pair (quotes included).
+            let wrapped = text.substring(with: selection)
+            replace(
+                in: textView,
+                range: selection,
+                with: String(character) + wrapped + String(closer),
+                caret: caret + (wrapped as NSString).length + 1)
+            return true
+        }
+        if nextIsBoundary {
+            replace(
+                in: textView,
+                range: NSRange(location: caret, length: 0),
+                with: String(character) + String(closer),
+                caret: caret + 1)
+            return true
+        }
+        return false
+    }
+
+    /// Return: carries the current line's indentation; a fresh open brace
+    /// before the caret expands to a blank indented line (and closes the
+    /// pair when the matching closer sits ahead).
+    func insertNewlineWithIndent(_ textView: NSTextView) {
+        guard textView.isEditable, !textView.hasMarkedText() else { return }
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        let caret = selection.location
+        let lineRange = text.lineRange(for: NSRange(location: caret, length: 0))
+        let line = text.substring(with: lineRange)
+        let indent = String(line.prefix { $0 == " " || $0 == "\t" })
+        let previous = char(text, caret - 1)
+        let next = char(text, caret)
+
+        if let previous, let closer = Self.openers[previous] {
+            if next == closer {
+                // Between a fresh pair: blank indented line between two
+                // carried-indent lines, caret in the middle.
+                replace(
+                    in: textView,
+                    range: NSRange(location: caret, length: selection.length),
+                    with: "\n" + indent + Self.indentUnit + "\n" + indent,
+                    caret: caret + 1 + (indent + Self.indentUnit).count)
+            } else {
+                replace(
+                    in: textView,
+                    range: NSRange(location: caret, length: selection.length),
+                    with: "\n" + indent + Self.indentUnit,
+                    caret: caret + 1 + (indent + Self.indentUnit).count)
+            }
+            return
+        }
+        replace(
+            in: textView,
+            range: NSRange(location: caret, length: selection.length),
+            with: "\n" + indent,
+            caret: caret + 1 + indent.count)
+    }
+
+    /// Tab inserts the indent unit (or indents the selection's lines);
+    /// Shift-Tab outdents the selection's lines by one unit.
+    func indentSelection(_ textView: NSTextView, outdent: Bool) {
+        guard textView.isEditable, !textView.hasMarkedText() else { return }
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        let unit = Self.indentUnit
+        if !outdent, selection.length == 0 {
+            replace(
+                in: textView,
+                range: NSRange(location: selection.location, length: 0),
+                with: unit,
+                caret: selection.location + unit.count)
+            return
+        }
+        guard
+            let selected = selectedBlock(text, selection: selection)
+        else { return }
+
+        var lines = selected.block.components(separatedBy: "\n")
+        var deltaBeforeCaret = 0
+        var consumed = 0
+        for index in lines.indices {
+            defer { consumed += lines[index].count + 1 }
+            let isBlank = lines[index].trimmingCharacters(in: .whitespaces).isEmpty
+            guard !isBlank else { continue }
+            let before = lines[index]
+            if outdent {
+                if before.hasPrefix("\t") {
+                    lines[index] = String(before.dropFirst())
+                } else {
+                    var removed = 0
+                    while removed < unit.count, lines[index].hasPrefix(" ") {
+                        lines[index] = String(lines[index].dropFirst())
+                        removed += 1
+                    }
+                }
+            } else {
+                lines[index] = unit + lines[index]
+            }
+            if consumed <= selected.caretOffset {
+                deltaBeforeCaret += lines[index].count - before.count
+            }
+        }
+        let newBlock = lines.joined(separator: "\n")
+        guard newBlock != selected.block else { return }
+        if selection.length == 0 {
+            replace(
+                in: textView,
+                range: selected.range,
+                with: newBlock,
+                caret: selection.location + deltaBeforeCaret)
+        } else {
+            // Keep the block selected, like every editor's Tab behavior.
+            let newLength = (newBlock as NSString).length
+            replace(
+                in: textView,
+                range: selected.range,
+                with: newBlock,
+                caret: selected.range.location)
+            textView.setSelectedRange(
+                NSRange(location: selected.range.location, length: newLength))
+        }
+    }
+
+    /// ⌘/: comments per the profile's comment style (line for JavaScript,
+    /// block for XML, nothing for JSON — no comments in the grammar, and
+    /// hosts pick their own style for their own languages). Returns whether
+    /// anything changed, so an unhandled key falls through.
+    func toggleComment(_ textView: NSTextView) -> Bool {
+        guard textView.isEditable, !textView.hasMarkedText() else { return false }
+        switch parent.syntax.commentStyle {
+        case .line(let prefix):
+            return toggleLineComments(textView, prefix: prefix)
+        case .block(let open, let close):
+            return toggleBlockComment(textView, open: open, close: close)
+        case .none:
+            return false
+        }
+    }
+
+    /// Line comments: comment when any selected line is uncommented,
+    /// uncomment when every non-blank selected line already carries the
+    /// comment token.
+    private func toggleLineComments(_ textView: NSTextView, prefix: String) -> Bool {
+        let token = prefix.trimmingCharacters(in: .whitespaces)
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        guard let selected = selectedBlock(text, selection: selection) else {
+            return false
+        }
+        var lines = selected.block.components(separatedBy: "\n")
+        var touched = false
+        let allCommented = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .allSatisfy { $0.trimmingCharacters(in: .whitespaces).hasPrefix(token) }
+        for index in lines.indices {
+            guard !lines[index].trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            let leading = lines[index].prefix { $0 == " " || $0 == "\t" }
+            let body = lines[index].dropFirst(leading.count)
+            if allCommented {
+                var stripped = body
+                if stripped.hasPrefix(token) { stripped = stripped.dropFirst(token.count) }
+                if stripped.hasPrefix(" ") { stripped = stripped.dropFirst(1) }
+                lines[index] = String(leading + stripped)
+            } else {
+                lines[index] = String(leading) + prefix + String(body)
+            }
+            touched = true
+        }
+        guard touched else { return false }
+        let newBlock = lines.joined(separator: "\n")
+        let newLength = (newBlock as NSString).length
+        replace(
+            in: textView,
+            range: selected.range,
+            with: newBlock,
+            caret: selected.range.location)
+        textView.setSelectedRange(
+            NSRange(location: selected.range.location, length: newLength))
+        return true
+    }
+
+    /// Block comments: wrap the selection (or the caret), or unwrap the
+    /// comment surrounding the selection. Tokens come from the profile.
+    private func toggleBlockComment(_ textView: NSTextView, open openToken: String, close closeToken: String) -> Bool {
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        let caret = min(selection.location, text.length)
+        let before = text.substring(to: caret)
+        let afterStart = min(NSMaxRange(selection), text.length)
+        let after = text.substring(from: afterStart)
+
+        // Uncomment when an opener before the selection pairs with a closer
+        // after it (simple surrounding check; comments do not nest).
+        let beforeText = before as NSString
+        let afterText = after as NSString
+        let open = beforeText.range(of: openToken, options: .backwards)
+        let closeInAfter = afterText.range(of: closeToken)
+        if open.location != NSNotFound, closeInAfter.location != NSNotFound,
+            NSMaxRange(open) <= caret,
+            afterStart + closeInAfter.location >= NSMaxRange(selection)
+        {
+            // Remove the closer first (higher offset): " -->" or "-->".
+            var closeStart = afterStart + closeInAfter.location
+            var closeLength = closeInAfter.length
+            if closeStart > 0, char(text, closeStart - 1) == " " {
+                closeStart -= 1
+                closeLength += 1
+            }
+            replace(
+                in: textView,
+                range: NSRange(location: closeStart, length: closeLength),
+                with: "",
+                caret: caret)
+            // Opener after the first replace (offsets below it hold).
+            var openLength = open.length
+            let currentText = textView.string as NSString
+            if NSMaxRange(open) < currentText.length,
+                char(currentText, NSMaxRange(open)) == " "
+            {
+                openLength += 1
+            }
+            replace(
+                in: textView,
+                range: NSRange(location: open.location, length: openLength),
+                with: "",
+                caret: max(caret - openLength, open.location))
+            return true
+        }
+
+        // Wrap: selection in place, or an empty pair at the caret.
+        if selection.length > 0 {
+            let wrapped = text.substring(with: selection)
+            replace(
+                in: textView,
+                range: selection,
+                with: openToken + " " + wrapped + " " + closeToken,
+                caret: selection.location + (wrapped as NSString).length + openToken.count + 1)
+        } else {
+            replace(
+                in: textView,
+                range: NSRange(location: caret, length: 0),
+                with: openToken + "  " + closeToken,
+                caret: caret + openToken.count + 1)
+        }
+        return true
+    }
+
+    // MARK: Shared edit plumbing
+
+    /// The character at a UTF-16 offset, or nil when out of bounds.
+    func char(_ text: NSString, _ offset: Int) -> Character? {
+        guard offset >= 0, offset < text.length,
+            let scalar = UnicodeScalar(text.character(at: offset))
+        else { return nil }
+        return Character(scalar)
+    }
+
+    /// A selected line block: its range (trailing newline excluded), the
+    /// text, and the caret's offset within it - the shape every block
+    /// transform (indent, outdent, comment toggle) consumes.
+    struct SelectedBlock {
+        let range: NSRange
+        let block: String
+        let caretOffset: Int
+    }
+
+    /// The line block covering the selection (or the caret's line), with
+    /// its trailing newline excluded from the returned range.
+    func selectedBlock(
+        _ text: NSString,
+        selection: NSRange
+    ) -> SelectedBlock? {
+        var end = selection.location + selection.length
+        if selection.length > 0, end > selection.location,
+            char(text, end - 1) == "\n"
+        {
+            end -= 1
+        }
+        var blockRange = text.lineRange(
+            for: NSRange(location: selection.location, length: max(end - selection.location, 0)))
+        if blockRange.length > 0,
+            char(text, NSMaxRange(blockRange) - 1) == "\n"
+        {
+            blockRange.length -= 1
+        }
+        guard blockRange.length > 0 else { return nil }
+        return SelectedBlock(
+            range: blockRange,
+            block: text.substring(with: blockRange),
+            caretOffset: selection.location - blockRange.location)
+    }
+
+    /// One undoable replacement through the pipeline: registers the undo
+    /// entry, funnels the edit through the text-storage delegate (paint +
+    /// binding + height), and lands the caret where the caller says.
+    @discardableResult
+    func replace(
+        in textView: NSTextView,
+        range: NSRange,
+        with replacement: String,
+        caret: Int
+    ) -> Bool {
+        let length = (textView.string as NSString).length
+        guard textView.isEditable, range.location >= 0, NSMaxRange(range) <= length else {
+            return false
+        }
+        guard textView.shouldChangeText(in: range, replacementString: replacement) else {
+            return false
+        }
+        textView.textStorage?.replaceCharacters(in: range, with: replacement)
+        textView.didChangeText()
+        let newLength = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: min(max(caret, 0), newLength), length: 0))
+        return true
+    }
+}
+
+extension NSRange {
+    /// Clamped to `0...length` (a stray NSNotFound must never reach the
+    /// storage). Nil when the range would be empty and out of bounds.
+    fileprivate func clamped(to length: Int) -> NSRange? {
+        guard location != NSNotFound else { return nil }
+        let start = min(max(location, 0), length)
+        let end = min(max(location + self.length, start), length)
+        return NSRange(location: start, length: end - start)
+    }
+}
