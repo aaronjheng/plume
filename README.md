@@ -2,8 +2,10 @@
 
 A macOS code editor base library for SwiftUI apps: a standalone `NSTextView`
 pipeline with incremental tree-sitter highlighting, a line-number gutter with
-error diagnostics, find/replace, go-to-line, and line operations - built once,
-consumed by Canoe (API client) and Runlet (Redis client).
+severity-graded diagnostics, regex find/replace, go-to-line/`line:column`,
+line operations and transforms, an overview ruler, and configurable
+indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
+(Redis client).
 
 ## What's inside
 
@@ -15,13 +17,26 @@ consumed by Canoe (API client) and Runlet (Redis client).
 - **Injected host integration**: chrome tokens (`EditorTheme`, set at app
   launch), annotation washes, an opaque completion engine, and a formatting
   handler - a host without any of them simply passes nothing.
-- **Editing assists**: enter-line indent carry, Tab/Shift-Tab block indent,
-  bracket/quote auto-pairing with skip-over, per-profile comment toggling,
-  duplicate/delete/move line, read-only selectable mode, placeholders,
-  auto-grow and fill-container sizing.
+- **Editing assists**: enter-line indent carry, Tab/Shift-Tab and ⌘]/⌘[
+  block indent, bracket/quote auto-pairing with skip-over, per-profile
+  comment toggling, duplicate/delete/move line, upper/lowercase, sort
+  lines, join lines, trim trailing whitespace, read-only selectable mode,
+  placeholders, auto-grow and fill-container sizing.
+- **Diagnostics** (Monaco: `setModelMarkers`): host-injected
+  `EditorMarker`s (severity/range/message) render as squiggles, gutter
+  dots, and tooltips alongside the parse's own syntax errors; the
+  overview ruler (`showsOverviewRuler`) plots them as ticks with a
+  viewport band and doubles as click/drag-to-scroll.
+- **Find/replace** (Monaco's find widget): match case, whole word (`ab`),
+  regular expressions (`.*`, `$1` templates in replacements), preserve
+  case (`AB`), match count/index, replace and replace-all.
+- **Indentation & wrapping** (Monaco options): `tabSize`/`insertSpaces`/
+  `detectIndentation` (indent guides track literal tabs too), `wordWrap`
+  (`.on`/`.off`/`.column(n)`), and go-to-line accepting `line:column`.
 - **Language-service hooks** (the Monaco set that makes sense embedded):
   completions (`suggestFactory` + `triggerCharacters`), hovers
-  (`hoverProvider`), formatting (`formatHandler`), tokens (`SyntaxHighlight`).
+  (`hoverProvider`), markers (`markers`), formatting (`formatHandler`),
+  tokens (`SyntaxHighlight`).
 
 ## Usage
 

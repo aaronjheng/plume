@@ -19,13 +19,14 @@ final class IMERenderTest: XCTestCase {
                 showsGutterSeparator: false, enablesTypingAssist: true, font: .monoBody,
                 formatHandler: nil, formatActionName: "Format", onFormatError: nil,
                 suggestFactory: nil, suggestItems: [], onStatsChange: nil, hoverProvider: nil,
-                enablesAutoPairing: true, renderWhitespace: .none,
+                enablesAutoPairing: true, renderWhitespace: .none, markers: [], showsOverviewRuler: false, tabSize: 2, insertSpaces: true,
+                detectIndentation: false, wordWrap: .on,
                 onContentHeightChange: nil, onGutterWidthChange: nil,
                 find: EditorFindState(), findAction: nil, onFindActionHandled: nil,
-                findHooks: nil, gotoLine: nil, onGoToLineHandled: nil, onLineCountHint: nil))
+                findHooks: nil, gotoLine: nil, gotoColumn: nil, onGoToLineHandled: nil, onLineCountHint: nil))
         let scrollView = NSScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 400, height: 100)
-        let root = EditorRootView(textView: textView, scrollView: scrollView, showsGutter: true)
+        let root = EditorRootView(textView: textView, scrollView: scrollView, showsGutter: true, showsRuler: false)
         root.frame = scrollView.bounds
         scrollView.documentView = textView
         textView.editorCoordinator = coordinator

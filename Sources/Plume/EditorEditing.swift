@@ -92,6 +92,98 @@ extension EditorCoordinator {
     }
 }
 
+// MARK: - Line transforms (Monaco built-ins)
+
+extension EditorCoordinator {
+    /// Applies `transform` over the selection's lines in place, keeping
+    /// the block selected (Monaco's transform commands).
+    func transformLines(in textView: NSTextView, transform: (String) -> String) {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
+        else { return }
+        let transformed = transform(selected.block)
+        guard transformed != selected.block else { return }
+        replace(
+            in: textView,
+            range: selected.range,
+            with: transformed,
+            caret: selected.range.location)
+        textView.setSelectedRange(
+            NSRange(location: selected.range.location, length: (transformed as NSString).length))
+    }
+
+    func uppercaseLines(in textView: NSTextView) {
+        transformLines(in: textView) { $0.uppercased() }
+    }
+
+    func lowercaseLines(in textView: NSTextView) {
+        transformLines(in: textView) { $0.lowercased() }
+    }
+
+    /// Sorts the selection's lines (locale-aware, like Monaco's sort
+    /// commands); the selection stays on the sorted block.
+    func sortLines(in textView: NSTextView, descending: Bool) {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
+        else { return }
+        let lines = selected.block.components(separatedBy: "\n")
+        let sorted = lines.sorted {
+            descending
+                ? $0.localizedStandardCompare($1) == .orderedDescending
+                : $0.localizedStandardCompare($1) == .orderedAscending
+        }
+        let result = sorted.joined(separator: "\n")
+        guard result != selected.block else { return }
+        replace(
+            in: textView,
+            range: selected.range,
+            with: result,
+            caret: selected.range.location)
+        textView.setSelectedRange(
+            NSRange(location: selected.range.location, length: (result as NSString).length))
+    }
+
+    /// Strips trailing spaces/tabs from every line of the document
+    /// (Monaco: Trim Trailing Whitespace) as one undoable step.
+    func trimTrailingWhitespace(in textView: NSTextView) {
+        guard textView.isEditable, !textView.hasMarkedText() else { return }
+        let text = textView.string
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "[ \\t]+$", options: [.anchorsMatchLines])
+        else { return }
+        let full = NSRange(location: 0, length: (text as NSString).length)
+        guard regex.firstMatch(in: text, range: full) != nil else { return }
+        let trimmed = regex.stringByReplacingMatches(
+            in: text, range: full, withTemplate: "")
+        replace(
+            in: textView,
+            range: full,
+            with: trimmed,
+            caret: min(textView.selectedRange().location, (trimmed as NSString).length))
+    }
+
+    /// Joins the selection's lines with single spaces (Monaco: Join
+    /// Lines); each seam's surrounding whitespace collapses to one space.
+    func joinLines(in textView: NSTextView) {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
+        else { return }
+        let lines = selected.block.components(separatedBy: "\n")
+        guard lines.count > 1 else { return }
+        let joined =
+            lines
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: " ")
+        guard joined != selected.block else { return }
+        replace(
+            in: textView,
+            range: selected.range,
+            with: joined,
+            caret: selected.range.location + (joined as NSString).length)
+    }
+}
+
 // MARK: - Bracket matching
 
 extension EditorCoordinator {
@@ -208,16 +300,23 @@ extension EditorCoordinator {
 // MARK: - Go to line / selection for find / delete to line start
 
 extension EditorCoordinator {
-    /// ⌥⌘L's submit: lands the caret on the head of line `line` (1-based,
-    /// clamped) and scrolls it into view.
-    func goToLine(_ line: Int, in textView: NSTextView) {
+    /// ⌥⌘L's submit: lands the caret on line `line` (1-based, clamped),
+    /// optionally at `column` (UTF-16 units into the line's content, the
+    /// same ledger the caret stats report; clamped to the line's end) and
+    /// scrolls it into view.
+    func goToLine(_ line: Int, column: Int? = nil, in textView: NSTextView) {
         let starts = highlighter.lineStartOffsets
         let clamped = min(max(line, 1), max(starts.count, 1))
         // Clamp against the live string: the incremental line ledger could
         // briefly disagree with the storage; an OOB caret here poisons the
         // text system (AppKit throws NSRangeException on the blink rect).
         let length = (textView.string as NSString).length
-        let location = min(starts[clamped - 1], length)
+        var location = min(starts[clamped - 1], length)
+        if let column {
+            let contentEnd = clamped < starts.count ? starts[clamped] - 1 : length
+            let maxColumn = max(contentEnd - location, 0)
+            location = min(location + min(max(column, 1) - 1, maxColumn), length)
+        }
         textView.setSelectedRange(NSRange(location: location, length: 0))
         textView.scrollRangeToVisible(NSRange(location: location, length: 0))
     }
@@ -320,10 +419,11 @@ extension EditorCoordinator {
 // MARK: - Syntax diagnostics
 
 extension EditorCoordinator {
-    /// After every storage edit: dashes the tree's ERROR/MISSING ranges and
-    /// marks their lines in the gutter. Capped (20 squiggles, 200 chars
-    /// each) so one broken brace early in a huge body doesn't paint half
-    /// the document.
+    /// After every storage edit and on host-marker updates: dashes the
+    /// merged diagnostic ranges (host markers first, then the tree's
+    /// ERROR/MISSING ranges) and marks their lines in the gutter. Capped
+    /// (20 squiggles, 200 chars each) so one broken brace early in a huge
+    /// body doesn't paint half the document.
     func refreshDiagnostics(in textView: NSTextView) {
         guard let layoutManager = textView.layoutManager else { return }
         let length = (textView.string as NSString).length
@@ -348,32 +448,47 @@ extension EditorCoordinator {
             layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: valid)
         }
         diagnosticUnderlineRanges = []
-        diagnosticRanges = []
-        diagnosticMessages = []
-        diagnosticLines = []
+        diagnosticEntries = []
+
+        // Host markers first (a dry-run error outranks transient parse
+        // noise), then the parse's own diagnostics; severity carries the
+        // paint color for squiggle, gutter dot, and tooltip.
+        var entries: [DiagnosticEntry] = hostMarkers.map {
+            DiagnosticEntry(range: $0.range, message: $0.message, severity: $0.severity)
+        }
+        for (range, message) in highlighter.diagnostics() {
+            entries.append(DiagnosticEntry(range: range, message: message, severity: .error))
+        }
 
         let style = NSNumber(value: NSUnderlineStyle.patternDash.rawValue)
-        var errorLines: Set<Int> = []
+        var lineSeverities: [Int: EditorMarkerSeverity] = [:]
         var underlineRanges: [NSRange] = []
-        for (range, _) in highlighter.diagnostics() where underlineRanges.count < 20 {
-            var squiggle = range.clampedToString(length)
+        for entry in entries where underlineRanges.count < 20 {
+            var squiggle = entry.range.clampedToString(length)
             guard squiggle.length > 0 else { continue }
             if squiggle.length > 200 { squiggle.length = 200 }
             underlineRanges.append(squiggle)
             let line = highlighter.lineNumber(ofUTF16Offset: squiggle.location)
-            errorLines.insert(line)
-            diagnosticLines.append(line)
+            if let existing = lineSeverities[line] {
+                // One dot per line; the most severe marker wins.
+                lineSeverities[line] = max(existing, entry.severity)
+            } else {
+                lineSeverities[line] = entry.severity
+            }
+            if intersectsMarked(squiggle) { continue }
             layoutManager.addTemporaryAttribute(.underlineStyle, value: style, forCharacterRange: squiggle)
             layoutManager.addTemporaryAttribute(
-                .underlineColor, value: NSColor(EditorTheme.error), forCharacterRange: squiggle)
+                .underlineColor, value: entry.severity.nsColor, forCharacterRange: squiggle)
         }
         diagnosticUnderlineRanges = underlineRanges
-        diagnosticRanges = underlineRanges
-        diagnosticMessages = highlighter.diagnostics().map(\.message)
+        diagnosticEntries = underlineRanges.enumerated().map { index, range in
+            DiagnosticEntry(range: range, message: entries[index].message, severity: entries[index].severity)
+        }
         if let gutter = rootView?.gutterView {
-            gutter.errorLines = errorLines
+            gutter.lineSeverities = lineSeverities
             gutter.needsDisplay = true
         }
+        rootView?.rulerView?.needsDisplay = true
     }
 }
 

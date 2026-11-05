@@ -65,6 +65,12 @@ final class IMERegressionTests: XCTestCase {
                 hoverProvider: nil,
                 enablesAutoPairing: true,
                 renderWhitespace: .none,
+                markers: [],
+                showsOverviewRuler: false,
+                tabSize: 2,
+                insertSpaces: true,
+                detectIndentation: false,
+                wordWrap: .on,
                 onContentHeightChange: nil,
                 onGutterWidthChange: nil,
                 find: EditorFindState(),
@@ -72,13 +78,14 @@ final class IMERegressionTests: XCTestCase {
                 onFindActionHandled: nil,
                 findHooks: nil,
                 gotoLine: nil,
+                gotoColumn: nil,
                 onGoToLineHandled: nil,
                 onLineCountHint: nil)
             self.representable = representable
             let scrollView = NSScrollView()
             let textView = EditorTextView()
             let coordinator = EditorCoordinator(representable)
-            let root = EditorRootView(textView: textView, scrollView: scrollView, showsGutter: true)
+            let root = EditorRootView(textView: textView, scrollView: scrollView, showsGutter: true, showsRuler: false)
             scrollView.documentView = textView
             textView.editorCoordinator = coordinator
             coordinator.rootView = root
@@ -117,6 +124,12 @@ final class IMERegressionTests: XCTestCase {
                 hoverProvider: nil,
                 enablesAutoPairing: true,
                 renderWhitespace: .none,
+                markers: [],
+                showsOverviewRuler: false,
+                tabSize: 2,
+                insertSpaces: true,
+                detectIndentation: false,
+                wordWrap: .on,
                 onContentHeightChange: nil,
                 onGutterWidthChange: nil,
                 find: EditorFindState(),
@@ -124,6 +137,7 @@ final class IMERegressionTests: XCTestCase {
                 onFindActionHandled: nil,
                 findHooks: nil,
                 gotoLine: nil,
+                gotoColumn: nil,
                 onGoToLineHandled: nil,
                 onLineCountHint: nil)
             representable = updated

@@ -12,6 +12,18 @@ public enum WhitespaceMode: Equatable, Sendable {
     case trailing
 }
 
+/// Line wrapping (Monaco: `wordWrap` + `wordWrapColumn`, with the
+/// `wordWrapColumn`/`bounded` distinction collapsed into one case).
+public enum EditorWordWrap: Equatable, Sendable {
+    /// Lines fill the container width (the historic default).
+    case on
+    /// Lines never wrap; the editor scrolls horizontally (and shows the
+    /// system's overlay scroller while panning).
+    case off
+    /// Lines wrap at the given column count (monospace cells).
+    case column(Int)
+}
+
 /// The generic code editor: a standalone NSTextView pipeline with
 /// incremental tree-sitter highlighting - each keystroke repaints only the
 /// lines the edit (and the parse's changed ranges) touch instead of
@@ -96,6 +108,32 @@ public struct Editor: View {
     /// covers the debug-gem cases (JSON tail spaces, RESP line endings)
     /// without the noise of dotting every indent.
     var renderWhitespace: WhitespaceMode = .none
+    /// Host-injected diagnostics (Monaco: `setModelMarkers`): squiggles,
+    /// gutter dots, and tooltips rendered alongside the parse's own syntax
+    /// errors. Read fresh on every host update; ranges are UTF-16 against
+    /// the current text.
+    var markers: [EditorMarker] = []
+    /// The overview ruler (Monaco: `overviewRulerLanes`): a narrow strip
+    /// right of the text with marker ticks and a viewport band, doubling
+    /// as the scroll affordance (click/drag scrolls). Off for compact
+    /// editors; worth its 14pt in full-pane surfaces.
+    var showsOverviewRuler: Bool = false
+    /// Spaces per indent level (Monaco: `tabSize`; also the tab stop
+    /// width for literal tab characters). Defaults to Plume's historic
+    /// 2; Monaco's default is 4.
+    var tabSize: Int = 2
+    /// Indent with spaces when true (Monaco: `insertSpaces`), tab
+    /// characters when false.
+    var insertSpaces: Bool = true
+    /// Infer `tabSize`/`insertSpaces` from the document's leading
+    /// whitespace on first fill (Monaco: `detectIndentation`); the
+    /// host-passed values are the fallback. Off by default (Plume's
+    /// surfaces are single-purpose bodies, not arbitrary files).
+    var detectIndentation: Bool = false
+    /// Line wrapping (Monaco: `wordWrap`). `.on` keeps the historic
+    /// fill-the-container behavior; `.off`/`.column(_)` scroll or wrap
+    /// horizontally instead.
+    var wordWrap: EditorWordWrap = .on
 
     /// A point-in-time snapshot of the document's size and caret position.
     public struct Stats: Equatable, Sendable {
@@ -135,6 +173,7 @@ public struct Editor: View {
     @State private var gotoVisible = false
     @State private var gotoText = ""
     @State private var gotoPendingLine: Int?
+    @State private var gotoPendingColumn: Int?
     /// Total lines, pushed back for the go-to-line prompt.
     @State private var lineCountHint = 1
 
@@ -162,6 +201,12 @@ public struct Editor: View {
         hoverProvider: ((_ range: NSRange) -> String?)? = nil,
         enablesAutoPairing: Bool = true,
         renderWhitespace: WhitespaceMode = .none,
+        markers: [EditorMarker] = [],
+        showsOverviewRuler: Bool = false,
+        tabSize: Int = 2,
+        insertSpaces: Bool = true,
+        detectIndentation: Bool = false,
+        wordWrap: EditorWordWrap = .on,
         autoGrowMinHeight: CGFloat = 40,
         autoGrowMaxHeight: CGFloat = 96
     ) {
@@ -187,6 +232,12 @@ public struct Editor: View {
         self.hoverProvider = hoverProvider
         self.enablesAutoPairing = enablesAutoPairing
         self.renderWhitespace = renderWhitespace
+        self.markers = markers
+        self.showsOverviewRuler = showsOverviewRuler
+        self.tabSize = tabSize
+        self.insertSpaces = insertSpaces
+        self.detectIndentation = detectIndentation
+        self.wordWrap = wordWrap
     }
 
     public var body: some View {
@@ -210,6 +261,12 @@ public struct Editor: View {
             hoverProvider: hoverProvider,
             enablesAutoPairing: enablesAutoPairing,
             renderWhitespace: renderWhitespace,
+            markers: markers,
+            showsOverviewRuler: showsOverviewRuler,
+            tabSize: tabSize,
+            insertSpaces: insertSpaces,
+            detectIndentation: detectIndentation,
+            wordWrap: wordWrap,
             onContentHeightChange: fillsContainer
                 ? nil
                 : { newHeight in
@@ -248,42 +305,55 @@ public struct Editor: View {
                 }
             ),
             gotoLine: gotoPendingLine,
-            onGoToLineHandled: { gotoPendingLine = nil },
-            onLineCountHint: { lineCountHint = $0 }
+            gotoColumn: gotoPendingColumn,
+            onGoToLineHandled: {
+                gotoPendingLine = nil
+                gotoPendingColumn = nil
+            },
+            onLineCountHint: { lineCountHint = $0 },
+            gotoVisible: gotoVisible
         )
         .overlay(alignment: .topTrailing) {
-            if findState.visible {
-                EditorFindBar(
-                    query: $findState.query,
-                    replacement: $findState.replacement,
-                    caseSensitive: $findState.caseSensitive,
-                    replacing: $findState.replacing,
-                    matchCount: findCount,
-                    matchIndex: findIndex,
-                    isEditable: isEditable,
-                    onNext: { findPendingAction = .next },
-                    onPrevious: { findPendingAction = .previous },
-                    onReplace: { findPendingAction = .replaceCurrent },
-                    onReplaceAll: { findPendingAction = .replaceAll },
-                    onClose: { findState.visible = false }
-                )
-                .padding(.trailing, EditorTheme.spaceMedium)
-                .padding(.top, EditorTheme.spaceXSmall)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-            if gotoVisible {
-                EditorGoToLineBar(
-                    text: $gotoText,
-                    lineCount: lineCountHint,
-                    onClose: { gotoVisible = false },
-                    onSubmit: {
-                        if let line = Int(gotoText) { gotoPendingLine = line }
-                        gotoVisible = false
-                    }
-                )
-                .padding(.trailing, EditorTheme.spaceMedium)
-                .padding(.top, EditorTheme.spaceXSmall)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            ZStack(alignment: .topTrailing) {
+                if findState.visible {
+                    EditorFindBar(
+                        query: $findState.query,
+                        replacement: $findState.replacement,
+                        caseSensitive: $findState.caseSensitive,
+                        isRegex: $findState.isRegex,
+                        wholeWord: $findState.wholeWord,
+                        preserveCase: $findState.preserveCase,
+                        replacing: $findState.replacing,
+                        matchCount: findCount,
+                        matchIndex: findIndex,
+                        isEditable: isEditable,
+                        onNext: { findPendingAction = .next },
+                        onPrevious: { findPendingAction = .previous },
+                        onReplace: { findPendingAction = .replaceCurrent },
+                        onReplaceAll: { findPendingAction = .replaceAll },
+                        onClose: { findState.visible = false }
+                    )
+                    .padding(.trailing, EditorTheme.spaceMedium)
+                    .padding(.top, EditorTheme.spaceXSmall)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                if gotoVisible {
+                    EditorGoToLineBar(
+                        text: $gotoText,
+                        lineCount: lineCountHint,
+                        onClose: { gotoVisible = false },
+                        onSubmit: {
+                            if let parsed = EditorGoToLineBar.parse(gotoText) {
+                                gotoPendingLine = parsed.line
+                                gotoPendingColumn = parsed.column
+                            }
+                            gotoVisible = false
+                        }
+                    )
+                    .padding(.trailing, EditorTheme.spaceMedium)
+                    .padding(.top, EditorTheme.spaceXSmall)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .frame(
@@ -346,6 +416,12 @@ struct EditorRepresentable: NSViewRepresentable {
     let hoverProvider: ((_ range: NSRange) -> String?)?
     let enablesAutoPairing: Bool
     let renderWhitespace: WhitespaceMode
+    let markers: [EditorMarker]
+    let showsOverviewRuler: Bool
+    let tabSize: Int
+    let insertSpaces: Bool
+    let detectIndentation: Bool
+    let wordWrap: EditorWordWrap
     let onContentHeightChange: ((CGFloat) -> Void)?
     let onGutterWidthChange: ((CGFloat) -> Void)?
     let find: EditorFindState
@@ -353,8 +429,12 @@ struct EditorRepresentable: NSViewRepresentable {
     let onFindActionHandled: (() -> Void)?
     let findHooks: EditorFindHooks?
     let gotoLine: Int?
+    let gotoColumn: Int?
     let onGoToLineHandled: (() -> Void)?
     let onLineCountHint: ((Int) -> Void)?
+    /// Whether the go-to-line panel is up (the find bar's visibility lives
+    /// in `find`); the cursor exclusion covers whichever bar is up.
+    var gotoVisible: Bool = false
 
     func makeCoordinator() -> EditorCoordinator {
         EditorCoordinator(self)
@@ -419,6 +499,13 @@ struct EditorRepresentable: NSViewRepresentable {
         textView.textStorage?.delegate = coordinator
 
         let scrollView = EditorScrollView()
+        // Own clip view, installed BEFORE the document view (swapping the
+        // content view after the document is installed orphans the text
+        // view and blanks the editor). AppKit's NSClipView overrides
+        // `resetCursorRects`; an empty override keeps the text view as the
+        // ONLY cursor-rect source, so its exclusion of the floating bars
+        // cannot be re-stamped from below.
+        scrollView.contentView = EditorClipView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
@@ -437,18 +524,30 @@ struct EditorRepresentable: NSViewRepresentable {
         let root = EditorRootView(
             textView: textView,
             scrollView: scrollView,
-            showsGutter: showsLineNumbers)
+            showsGutter: showsLineNumbers,
+            showsRuler: showsOverviewRuler)
         coordinator.rootView = root
+        if let ruler = root.rulerView {
+            ruler.textView = textView
+            ruler.coordinator = coordinator
+            ruler.observeScroll(of: scrollView)
+        }
         guard let gutter = root.gutterView else { return root }
         gutter.textView = textView
         gutter.showsSeparator = showsGutterSeparator
         gutter.observeScroll(of: scrollView)
         gutter.highlighter = coordinator.highlighter
+        gutter.coordinator = coordinator
         gutter.font = font.nsFont
 
         // Initial fill through the standard pipeline: setting the storage
         // fires the text-storage delegate, which parses and paints.
         coordinator.replaceAll(text, in: textView)
+        // Detection runs after the fill (the document decides), then the
+        // tab stops and wrap follow the possibly-overridden config.
+        coordinator.detectIndentationIfNeeded(text)
+        coordinator.applyTabStops(to: textView)
+        coordinator.applyWordWrap(wordWrap, to: textView)
         return root
     }
 
@@ -516,6 +615,35 @@ struct EditorRepresentable: NSViewRepresentable {
             gutter.font = font.nsFont
         }
 
+        // Indentation config follows the host until detection has spoken;
+        // tab stops re-apply when the width changed.
+        if !coordinator.didDetectIndentation {
+            let config = EditorCoordinator.IndentConfiguration(
+                tabSize: max(tabSize, 1), insertSpaces: insertSpaces)
+            if config != coordinator.indent {
+                coordinator.indent = config
+                coordinator.applyTabStops(to: textView)
+                textView.needsDisplay = true
+            }
+        }
+        coordinator.applyWordWrap(wordWrap, to: textView)
+
+        // The floating bars sit over the text view. Hand the text view
+        // their rect so it drops its I-beam cursor claim there; otherwise
+        // AppKit's cursor rectangles (resolved after SwiftUI sets a
+        // cursor) paint the insertion cursor over the whole bar and its
+        // buttons never show the pointing hand.
+        //
+        // The rect is COMPUTED here, not measured in SwiftUI: the bars'
+        // layouts are all fixed widths anchored top-trailing, so the
+        // coordinator can derive it from the root's bounds and the shared
+        // card metrics - no geometry-callback round-trip to break. It is
+        // computed in the ROOT's coordinates and then CONVERTED into the
+        // text view's (flipped, scroll-dependent) system - assigning root
+        // coordinates directly would land the exclusion at the BOTTOM of
+        // the flipped text view, leaving the bar fully I-beam'd.
+        coordinator.refreshCursorExclusion()
+
         // Find/action/goto pipeline (missing from the original: buttons
         // and go-to-line actions set state but never executed). Actions are
         // processed synchronously for immediate feedback; SwiftUI-state
@@ -527,47 +655,75 @@ struct EditorRepresentable: NSViewRepresentable {
             coordinator.lastProcessedFindAction = action
             DispatchQueue.main.async { onFindActionHandled?() }
         }
-        if let line = gotoLine, line != coordinator.lastProcessedGotoLine {
-            coordinator.gotoLine = line
-            coordinator.goToLine(line, in: textView)
+        if let line = gotoLine,
+            line != coordinator.lastProcessedGotoLine
+                || gotoColumn != coordinator.lastProcessedGotoColumn
+        {
+            coordinator.goToLine(line, column: gotoColumn, in: textView)
             coordinator.lastProcessedGotoLine = line
+            coordinator.lastProcessedGotoColumn = gotoColumn
             DispatchQueue.main.async { onGoToLineHandled?() }
         }
         coordinator.syncFindState(find, in: textView)
+        // Host markers changed: re-run the squiggle pass (the tree's own
+        // diagnostics re-render with it - the merged entry list).
+        if markers != coordinator.lastHostMarkers {
+            coordinator.lastHostMarkers = markers
+            coordinator.hostMarkers = markers
+            coordinator.refreshDiagnostics(in: textView)
+        }
     }
     static func dismantleNSView(_ root: EditorRootView, coordinator: EditorCoordinator) {
         coordinator.suggest?.hide()
     }
 }
 
-/// Root container laying the gutter left of the scroll view with explicit
-/// constraints (no stack view: the gutter width is a live constraint).
+/// Root container laying the gutter left of the scroll view and the
+/// overview ruler right of it, with explicit constraints (no stack view:
+/// the gutter width is a live constraint).
 final class EditorRootView: NSView {
     private(set) weak var textView: NSTextView?
     private(set) weak var gutterView: EditorGutterView?
+    private(set) weak var rulerView: EditorOverviewRulerView?
     private let gutterWidthConstraint: NSLayoutConstraint
+    private let rulerWidthConstraint: NSLayoutConstraint
 
-    init(textView: NSTextView, scrollView: NSScrollView, showsGutter: Bool) {
+    init(textView: NSTextView, scrollView: NSScrollView, showsGutter: Bool, showsRuler: Bool) {
         self.textView = textView
         let gutter = EditorGutterView(frame: .zero)
         gutterView = gutter
+        let ruler = EditorOverviewRulerView(frame: .zero)
+        rulerView = ruler
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         gutter.translatesAutoresizingMaskIntoConstraints = false
+        ruler.translatesAutoresizingMaskIntoConstraints = false
         gutterWidthConstraint = gutter.widthAnchor.constraint(equalToConstant: 30)
+        rulerWidthConstraint = ruler.widthAnchor.constraint(equalToConstant: EditorOverviewRulerView.width)
         super.init(frame: .zero)
         addSubview(gutter)
         addSubview(scrollView)
+        addSubview(ruler)
         NSLayoutConstraint.activate([
             gutter.leadingAnchor.constraint(equalTo: leadingAnchor),
             gutter.topAnchor.constraint(equalTo: topAnchor),
             gutter.bottomAnchor.constraint(equalTo: bottomAnchor),
             gutterWidthConstraint,
             scrollView.leadingAnchor.constraint(equalTo: gutter.trailingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ruler.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            ruler.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ruler.topAnchor.constraint(equalTo: topAnchor),
+            ruler.bottomAnchor.constraint(equalTo: bottomAnchor),
+            rulerWidthConstraint,
         ])
         gutter.isHidden = !showsGutter
+        ruler.isHidden = !showsRuler
+        if !showsRuler {
+            // A hidden view still participates in constraints; collapse the
+            // strip so the text area reclaims its width.
+            rulerWidthConstraint.constant = 0
+        }
     }
 
     func setGutterWidth(_ width: CGFloat) {
@@ -592,6 +748,15 @@ final class EditorScrollView: NSScrollView {
     }
 }
 
+/// The editor's clip view. AppKit's NSClipView overrides
+/// `resetCursorRects`; an empty override keeps the text view as the only
+/// cursor-rect source so its exclusion of the floating bars stands (the
+/// stack's `documentCursor` is nil, so nothing else is lost). Must be
+/// installed BEFORE the document view.
+final class EditorClipView: NSClipView {
+    override func resetCursorRects() {}
+}
+
 /// NSTextView with the editor's key surfaces: ⌥⇧F formatting (intercepted
 /// in `keyDown` - AppKit routes only Command-carrying events through
 /// `performKeyEquivalent`, so an Option+Shift press would sail past as the
@@ -605,6 +770,111 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     /// when the view grows, so hovers work over newly revealed content).
     private var tooltipTag: NSView.ToolTipTag?
     private var tooltipBounds: NSRect = .zero
+    /// Font stand-in when the view's font is momentarily nil (draw pass
+    /// before the first attribute application).
+    static let fallbackFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    /// Region of this view the editor must NOT claim an I-beam cursor
+    /// over: the floating find / go-to bars, which hover above the text
+    /// view. Coordinates are this view's.
+    ///
+    /// AppKit resolves the cursor from real cursor rectangles and does so
+    /// AFTER SwiftUI has applied a `.pointerStyle`, so this text view's
+    /// full-bounds I-beam covered the bars too and every one of their
+    /// buttons hovered as the insertion cursor instead of the pointing
+    /// hand. Dropping the claim underneath them lets the overlay's own
+    /// pointer styles win; the bars' text fields keep their own I-beam
+    /// because they install their own cursor rectangles.
+    var cursorExclusionRect: NSRect = .zero {
+        didSet {
+            guard cursorExclusionRect != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    /// The I-beam everywhere except `cursorExclusionRect`.
+    override func resetCursorRects() {
+        guard !cursorExclusionRect.isEmpty, !bounds.isEmpty else {
+            super.resetCursorRects()
+            return
+        }
+        let rects = Self.rects(within: bounds, excluding: cursorExclusionRect)
+        for rect in rects {
+            addCursorRect(rect, cursor: .iBeam)
+        }
+    }
+
+    /// Same exclusion for the mouse-moved path: NSTextView manages the
+    /// cursor from `mouseMoved` too (its tracking areas deliver those
+    /// events across the text view's whole bounds, and the floating bars -
+    /// layer content in the hosting view - never occlude them at the
+    /// AppKit level). Without this decline, every mouse move over a bar
+    /// re-stamps the I-beam right after SwiftUI's pointer style has set
+    /// the pointing hand - the "hand flashes, then I-beam" flicker.
+    override func mouseMoved(with event: NSEvent) {
+        if isInCursorExclusion(event.locationInWindow) {
+            nextResponder?.mouseMoved(with: event)
+            return
+        }
+        super.mouseMoved(with: event)
+    }
+
+    /// Tracking-area entries: same decline as `mouseMoved` (an enter at a
+    /// point inside a bar must not stamp the I-beam either).
+    override func mouseEntered(with event: NSEvent) {
+        if isInCursorExclusion(event.locationInWindow) {
+            nextResponder?.mouseEntered(with: event)
+            return
+        }
+        super.mouseEntered(with: event)
+    }
+
+    /// Same exclusion for the MODERN cursor path: cursor-update events.
+    /// NSTextView carries a tracking area across its whole bounds, and the
+    /// floating bars are not AppKit views (they are layer content in the
+    /// hosting view), so nothing occludes that area at the AppKit level -
+    /// the text view's `cursorUpdate` keeps stamping the I-beam over the
+    /// bars no matter what `resetCursorRects` says. Declining the event in
+    /// the excluded region (forwarding up the responder chain, where the
+    /// hosting view's SwiftUI pointer machinery lives) lets the bars'
+    /// pointing-hand styles stand.
+    override func cursorUpdate(with event: NSEvent) {
+        if isInCursorExclusion(event.locationInWindow) {
+            nextResponder?.cursorUpdate(with: event)
+            return
+        }
+        super.cursorUpdate(with: event)
+    }
+
+    /// Whether `windowPoint` falls in `cursorExclusionRect`.
+    private func isInCursorExclusion(_ windowPoint: NSPoint) -> Bool {
+        guard !cursorExclusionRect.isEmpty else { return false }
+        return cursorExclusionRect.contains(convert(windowPoint, from: nil))
+    }
+
+    /// `area` minus `hole`, as up to four disjoint rectangles.
+    private static func rects(within area: NSRect, excluding hole: NSRect) -> [NSRect] {
+        let clipped = hole.intersection(area)
+        guard !clipped.isNull, !clipped.isEmpty else { return [area] }
+        var rects: [NSRect] = []
+        if clipped.minY > area.minY {
+            rects.append(
+                NSRect(x: area.minX, y: area.minY, width: area.width, height: clipped.minY - area.minY))
+        }
+        if clipped.maxY < area.maxY {
+            rects.append(
+                NSRect(x: area.minX, y: clipped.maxY, width: area.width, height: area.maxY - clipped.maxY))
+        }
+        if clipped.minX > area.minX {
+            rects.append(
+                NSRect(x: area.minX, y: clipped.minY, width: clipped.minX - area.minX, height: clipped.height))
+        }
+        if clipped.maxX < area.maxX {
+            rects.append(
+                NSRect(x: clipped.maxX, y: clipped.minY, width: area.maxX - clipped.maxX, height: clipped.height))
+        }
+        return rects
+    }
 
     /// Selection boundary: clamps out-of-bounds ranges against the LIVE
     /// storage length before the layout machinery sees them. An
@@ -741,6 +1011,14 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.duplicateLines(in: self)
             return true
         }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "]" {
+            coordinator.indentSelection(self, outdent: false)
+            return true
+        }
+        if modifiers == [.command], event.charactersIgnoringModifiers == "[" {
+            coordinator.indentSelection(self, outdent: true)
+            return true
+        }
         if modifiers == [.command, .shift], event.charactersIgnoringModifiers == "k" {
             coordinator.deleteLines(in: self)
             return true
@@ -812,15 +1090,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     ) -> String {
         guard let coordinator = editorCoordinator, let layoutManager, let textContainer else { return "" }
         let characterIndex = layoutManager.characterIndex(for: point, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
-        // Diagnostics win: the syntax error's own tooltip takes precedence
-        // over any host hover on the same token.
-        for (index, range) in coordinator.diagnosticRanges.enumerated()
-        where NSLocationInRange(characterIndex, range) {
-            let position = coordinator.highlighter.lineAndColumn(ofUTF16Offset: range.location)
-            let message =
-                index < coordinator.diagnosticMessages.count
-                ? coordinator.diagnosticMessages[index] : "Syntax error"
-            return "\(message) (line \(position.line), column \(position.column))"
+        // Diagnostics win: the marker's own tooltip takes precedence over
+        // any host hover on the same token.
+        for entry in coordinator.diagnosticEntries
+        where NSLocationInRange(characterIndex, entry.range) {
+            let position = coordinator.highlighter.lineAndColumn(ofUTF16Offset: entry.range.location)
+            let label = entry.severity == .error ? "" : "\(entry.severity): "
+            return "\(label)\(entry.message) (line \(position.line), column \(position.column))"
         }
         // Host hover provider: consult on the range under the pointer.
         if let hoverProvider = coordinator.parent.hoverProvider, characterIndex < nsStringLength {
@@ -854,18 +1130,27 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
 
     private var nsStringLength: Int { (string as NSString).length }
 
-    /// The band behind the caret's line, drawn before the text (the view's
-    /// background is transparent, so the fill shows through).
-    /// Diagnostic switch (host-settable): skip all custom draw work and
-    /// go straight to super - isolates whether the custom draw pass
-    /// interferes with text rendering.
-
+    /// Custom draw pass: the caret line's band, the indent guides, and
+    /// the whitespace markers, all painted UNDER the text (the view's
+    /// background is transparent, so the fills show through).
+    /// `EditorTheme.debugDisableCustomDrawing` is the diagnostic switch
+    /// that skips all of it and renders text only.
     override func draw(_ dirtyRect: NSRect) {
         if EditorTheme.debugDisableCustomDrawing {
             super.draw(dirtyRect)
             return
         }
+        drawLineBand()
+        drawIndentGuides(dirtyRect: dirtyRect)
+        drawWhitespace(dirtyRect: dirtyRect)
         super.draw(dirtyRect)
+    }
+
+    /// The band behind the caret's line (Monaco: `renderLineHighlight`).
+    private func drawLineBand() {
+        guard !lineBandRect.isEmpty else { return }
+        NSColor(EditorTheme.subtleBackground).withAlphaComponent(0.5).setFill()
+        lineBandRect.fill()
     }
 
     /// Whitespace markers (Monaco: `renderWhitespace`): faint middots on
@@ -926,21 +1211,27 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
     }
 
-    /// Faint vertical guides at every indent level of each visible line
-    /// fragment (the project's 2-space unit). Drawn under the text; wrapped
-    /// continuations carry no leading whitespace and get none.
+    /// Faint vertical guides at every completed indent level of each
+    /// visible line fragment (Monaco: `guides.indentation`). The leading
+    /// whitespace is walked unit by unit against the configured `tabSize`:
+    /// every `tabSize` spaces - or a literal tab, which renders at
+    /// `tabSize` columns via the default paragraph style - completes one
+    /// level. Mixed space/tab indentation tracks the actual glyph runs.
+    /// Wrapped continuations carry no leading whitespace and get none.
     private func drawIndentGuides(dirtyRect: NSRect) {
-        guard let layoutManager = layoutManager, let container = textContainer,
+        guard let coordinator = editorCoordinator,
+            let layoutManager = layoutManager, let container = textContainer,
             !string.isEmpty
         else { return }
         let nsString = string as NSString
         let length = nsString.length
-        let unitWidth = ("  " as NSString).size(withAttributes: [.font: font as Any]).width
-        guard unitWidth > 0 else { return }
-        let bounding = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
-        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
+        let tabSize = max(coordinator.indent.tabSize, 1)
+        let spaceWidth = coordinator.spaceWidth(for: font ?? Self.fallbackFont)
+        let unitWidth = spaceWidth * CGFloat(tabSize)
         let guideColor = EditorTheme.textPrimaryNS.withAlphaComponent(0.12)
         guideColor.setFill()
+        let bounding = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
         var index = glyphRange.location
         let end = NSMaxRange(glyphRange)
         while index < end {
@@ -955,21 +1246,47 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                 location: charRange.location,
                 length: min(charRange.length, length - charRange.location))
             guard clamped.length > 0 else { break }
-            let leading = nsString.substring(with: clamped).prefix { $0 == " " }.count
-            let level = leading / 2
-            if level > 0 {
-                let baseX = fragment.minX + textContainerOrigin.x + Editor.fragmentPadding
-                for levelIndex in 0..<min(level, 12) {
-                    NSRect(
-                        x: baseX + CGFloat(levelIndex) * unitWidth,
-                        y: fragment.minY + textContainerOrigin.y,
-                        width: 1,
-                        height: fragment.height
-                    ).fill()
+            // Walk the leading whitespace run: the cursor advances one
+            // space width per space (a boundary completes every
+            // `tabSize`) or one unit width per tab, and a guide is drawn
+            // at each completed boundary. Capped at 12 levels like
+            // Monaco's deep indent.
+            var guideX = fragment.minX + textContainerOrigin.x + Editor.fragmentPadding
+            var levels = 0
+            var spacesInUnit = 0
+            scan: for character in nsString.substring(with: clamped) {
+                switch character {
+                case " ":
+                    guideX += spaceWidth
+                    spacesInUnit += 1
+                    if spacesInUnit >= tabSize {
+                        spacesInUnit = 0
+                        drawIndentGuide(at: guideX, fragment: fragment)
+                        levels += 1
+                    }
+                case "\t":
+                    guideX += unitWidth
+                    spacesInUnit = 0
+                    drawIndentGuide(at: guideX, fragment: fragment)
+                    levels += 1
+                default:
+                    break scan
                 }
+                if levels >= 12 { break }
             }
             index = NSMaxRange(fragmentGlyphs)
         }
+    }
+
+    /// One vertical hairline for a completed indent level, spanning the
+    /// fragment's height.
+    private func drawIndentGuide(at guideX: CGFloat, fragment: CGRect) {
+        NSRect(
+            x: guideX,
+            y: fragment.minY + textContainerOrigin.y,
+            width: 1,
+            height: fragment.height
+        ).fill()
     }
 
     /// Recomputes the caret line's band and invalidates the old and new
@@ -1035,6 +1352,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         item("Move Line Up", upKey, [.control, .command], #selector(menuMoveLinesUp), editable)
         item("Move Line Down", downKey, [.control, .command], #selector(menuMoveLinesDown), editable)
         menu.addItem(.separator())
+        item("Transform to Uppercase", "", [], #selector(menuUppercaseLines), editable)
+        item("Transform to Lowercase", "", [], #selector(menuLowercaseLines), editable)
+        item("Sort Lines A–Z", "", [], #selector(menuSortAscending), editable)
+        item("Sort Lines Z–A", "", [], #selector(menuSortDescending), editable)
+        item("Join Lines", "", [], #selector(menuJoinLines), editable)
+        item("Trim Trailing Whitespace", "", [], #selector(menuTrimWhitespace), editable)
+        menu.addItem(.separator())
         item("Paste and Format", "v", [.command, .option, .shift], #selector(menuPasteAndFormat), editable && coordinator.canFormat(self))
         item("Go to Line…", "l", [.command, .option], #selector(menuGoToLine), true)
         item("Use Selection for Find", "e", [.command, .option], #selector(menuUseSelectionForFind), selectedRange().length > 0)
@@ -1047,6 +1371,12 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     @objc private func menuDeleteLines() { editorCoordinator?.deleteLines(in: self) }
     @objc private func menuMoveLinesUp() { editorCoordinator?.moveLines(in: self, up: true) }
     @objc private func menuMoveLinesDown() { editorCoordinator?.moveLines(in: self, up: false) }
+    @objc private func menuUppercaseLines() { editorCoordinator?.uppercaseLines(in: self) }
+    @objc private func menuLowercaseLines() { editorCoordinator?.lowercaseLines(in: self) }
+    @objc private func menuSortAscending() { editorCoordinator?.sortLines(in: self, descending: false) }
+    @objc private func menuSortDescending() { editorCoordinator?.sortLines(in: self, descending: true) }
+    @objc private func menuJoinLines() { editorCoordinator?.joinLines(in: self) }
+    @objc private func menuTrimWhitespace() { editorCoordinator?.trimTrailingWhitespace(in: self) }
     @objc private func menuFind() { editorCoordinator?.requestFind(replaceMode: false, in: self) }
     @objc private func menuPasteAndFormat() { editorCoordinator?.pasteAndFormat(in: self) }
     @objc private func menuGoToLine() { editorCoordinator?.requestLinePanel(in: self) }
@@ -1107,15 +1437,12 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     var bracketHighlightRanges: [NSRange] = []
     /// The currently washed word-occurrence ranges (temporary attributes).
     var wordHighlightRanges: [NSRange] = []
-    /// The currently dashed error-underline ranges (temporary attributes).
+    /// The currently dashed diagnostic-underline ranges (temporary attributes).
     var diagnosticUnderlineRanges: [NSRange] = []
-    /// The live diagnostics behind the underlines: range, message, and the
-    /// 1-based line (parallel to `diagnosticUnderlineRanges`).
-    var diagnosticRanges: [NSRange] = []
-    var diagnosticMessages: [String] = []
-    var diagnosticLines: [Int] = []
-    /// The pending go-to-line number (nil = nothing queued).
-    var gotoLine: Int?
+    /// The live rendered diagnostics behind the underlines: host markers
+    /// first, then the parse's syntax errors - range, message, severity
+    /// (parallel to `diagnosticUnderlineRanges`).
+    var diagnosticEntries: [DiagnosticEntry] = []
     /// The last reported stats, so repeated identical reports are dropped.
     private var lastStats: Editor.Stats?
 
@@ -1140,6 +1467,146 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// Last processed find/goto actions so synchronous SwiftUI-state
     /// clears (dropped inside update transactions) do not re-trigger.
     fileprivate var lastProcessedFindAction: EditorFindAction?
+    /// The host markers currently rendered (diffed in updateNSView so a
+    /// new array re-runs the squiggle pass).
+    var hostMarkers: [EditorMarker] = []
+    var lastHostMarkers: [EditorMarker] = []
+    /// Indentation configuration (Monaco: `tabSize` + `insertSpaces`),
+    /// possibly overridden by `detectIndentation` on first fill.
+    struct IndentConfiguration: Equatable {
+        var tabSize: Int
+        var insertSpaces: Bool
+    }
+    var indent = IndentConfiguration(tabSize: 2, insertSpaces: true)
+    /// The detect-once latch: after the first fill's detection the
+    /// document's own style wins over later host value changes.
+    var didDetectIndentation = false
+    /// Last applied wrap mode (updateNSView diff).
+    var lastWordWrap: EditorWordWrap?
+    /// The indent unit typed by Tab and brace expansion: `tabSize`
+    /// spaces, or one tab character.
+    var indentUnit: String {
+        indent.insertSpaces
+            ? String(repeating: " ", count: max(indent.tabSize, 1))
+            : "\t"
+    }
+    /// The rendered advance of one space at `font` (guides + tab stops).
+    func spaceWidth(for font: NSFont) -> CGFloat {
+        max((" " as NSString).size(withAttributes: [.font: font]).width, 1)
+    }
+    /// Recomputes the floating bars' cursor exclusion rect and hands it to
+    /// the text view. Called from `updateNSView` and on every scroll tick:
+    /// the bars are pinned to the viewport while cursor rects live in the
+    /// text view's (flipped, scroll-dependent) content coordinates, so the
+    /// rect must be re-derived — through `convert(_:from:)`, which handles
+    /// both the flip and the scroll offset — whenever either moves.
+    func refreshCursorExclusion() {
+        guard let root = rootView, let textView = root.textView as? EditorTextView else { return }
+        let cardSize: CGSize?
+        if parent.find.visible {
+            cardSize = EditorFindBar.cardSize(replacing: parent.find.replacing)
+        } else if parent.gotoVisible {
+            cardSize = EditorGoToLineBar.cardSize()
+        } else {
+            cardSize = nil
+        }
+        guard let cardSize else {
+            textView.cursorExclusionRect = .zero
+            return
+        }
+        // The card in the ROOT's (bottom-left) coordinates: top-trailing
+        // with the overlay's outer paddings.
+        let rootRect = NSRect(
+            x: root.bounds.width - EditorTheme.spaceMedium - cardSize.width,
+            y: root.bounds.height - EditorTheme.spaceXSmall - cardSize.height,
+            width: cardSize.width,
+            height: cardSize.height)
+        // Into the text view's flipped, scrolled system — this is the step
+        // whose omission left the exclusion at the bottom of the editor.
+        textView.cursorExclusionRect = textView.convert(rootRect, from: root)
+    }
+
+    /// Literal tab characters render at `tabSize` columns in both modes
+    /// (Monaco semantics), via the text view's default paragraph style.
+    func applyTabStops(to textView: NSTextView) {
+        let width = spaceWidth(for: parent.font.nsFont) * CGFloat(max(indent.tabSize, 1))
+        let style = NSMutableParagraphStyle()
+        style.defaultTabInterval = width
+        if textView.defaultParagraphStyle != style {
+            textView.defaultParagraphStyle = style
+            textView.needsDisplay = true
+        }
+    }
+    /// Applies the wrap mode (Monaco: `wordWrap`): `.on` tracks the text
+    /// view's width; `.off`/`.column(_)` release the container width so
+    /// lines run long and the scroll view pans horizontally (overlay
+    /// scroller enabled for the pan feedback).
+    func applyWordWrap(_ wrap: EditorWordWrap, to textView: NSTextView) {
+        guard wrap != lastWordWrap else { return }
+        lastWordWrap = wrap
+        let spaceWidth = spaceWidth(for: parent.font.nsFont)
+        let containerWidth: CGFloat
+        switch wrap {
+        case .on: containerWidth = 0
+        case .off: containerWidth = .greatestFiniteMagnitude
+        case .column(let columns): containerWidth = CGFloat(max(columns, 1)) * spaceWidth
+        }
+        let tracksWidth = wrap == .on
+        let horizontallyResizable = wrap != .on
+        if let container = textView.textContainer {
+            if container.widthTracksTextView != tracksWidth {
+                container.widthTracksTextView = tracksWidth
+            }
+            if container.containerSize.width != containerWidth {
+                container.containerSize = NSSize(
+                    width: containerWidth, height: container.containerSize.height)
+            }
+        }
+        if textView.isHorizontallyResizable != horizontallyResizable {
+            textView.isHorizontallyResizable = horizontallyResizable
+            textView.autoresizingMask = horizontallyResizable ? [] : [.width]
+        }
+        if let scrollView = textView.enclosingScrollView,
+            scrollView.hasHorizontalScroller != horizontallyResizable
+        {
+            scrollView.hasHorizontalScroller = horizontallyResizable
+        }
+        textView.needsLayout = true
+        textView.needsDisplay = true
+        reportContentHeight(textView)
+    }
+    /// First-fill detection (Monaco: `detectIndentation`): the majority
+    /// style of the document's leading whitespace wins; for spaces, the
+    /// GCD of leading runs (clamped 1...8) is the unit.
+    func detectIndentationIfNeeded(_ text: String) {
+        guard parent.detectIndentation, !didDetectIndentation, !text.isEmpty else { return }
+        didDetectIndentation = true
+        var tabLines = 0
+        var spaceLines = 0
+        var runGCD = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).prefix(200) {
+            if line.hasPrefix("\t") {
+                tabLines += 1
+                continue
+            }
+            let spaces = line.prefix(while: { $0 == " " }).count
+            if spaces > 0 {
+                spaceLines += 1
+                runGCD = Self.gcd(runGCD, spaces)
+            }
+        }
+        if tabLines > spaceLines {
+            indent.insertSpaces = false
+        } else if spaceLines > tabLines, runGCD > 0 {
+            indent.tabSize = min(max(runGCD, 1), 8)
+        }
+    }
+    private static func gcd(_ first: Int, _ second: Int) -> Int {
+        var first = first
+        var second = second
+        while second != 0 { (first, second) = (second, first % second) }
+        return first
+    }
     /// The moment of the last storage edit (IME commit protection in
     /// updateNSView's replaceAll branch).
     var lastCommitTime: Date?
@@ -1148,6 +1615,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// that regenerates zero-advance CJK glyphs.
     var lastEditHadNonASCII = false
     fileprivate var lastProcessedGotoLine: Int?
+    fileprivate var lastProcessedGotoColumn: Int?
     var lastLineCountHint = 1
     /// The character index the diagnostic tooltip last resolved (dedupes
     /// provider calls on the same token).
@@ -1164,6 +1632,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         self.suggest = parent.suggestFactory?()
         self.lastRestyleKey = parent.restyleKey
         self.lastSyntax = parent.syntax
+        self.hostMarkers = parent.markers
         self.highlighter = SourceHighlighter(profile: parent.syntax)
         super.init()
     }
@@ -1222,6 +1691,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         (textView as? EditorTextView)?.refreshLineBand()
         updateBracketHighlight(in: textView)
         updateWordHighlight(in: textView)
+        rootView?.rulerView?.needsDisplay = true
     }
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -1426,6 +1896,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         // makeNSView/updateNSView transactions) would reschedule layout
         // mid-transaction and blank sibling SwiftUI rows.
         redrawGutter()
+        rootView?.rulerView?.needsDisplay = true
     }
 
     func redrawGutter() {
@@ -1471,7 +1942,6 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
 
     // MARK: Smart editing
 
-    private static let indentUnit = "  "
     /// Opening characters that auto-close, and quote characters that pair.
     /// `{` deliberately never pairs: in an API client every brace is either
     /// a JSON delimiter or the `{{template}}` opener, and pairing it eats
@@ -1554,14 +2024,14 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
                 replace(
                     in: textView,
                     range: NSRange(location: caret, length: selection.length),
-                    with: "\n" + indent + Self.indentUnit + "\n" + indent,
-                    caret: caret + 1 + (indent + Self.indentUnit).count)
+                    with: "\n" + indent + indentUnit + "\n" + indent,
+                    caret: caret + 1 + (indent + indentUnit).count)
             } else {
                 replace(
                     in: textView,
                     range: NSRange(location: caret, length: selection.length),
-                    with: "\n" + indent + Self.indentUnit,
-                    caret: caret + 1 + (indent + Self.indentUnit).count)
+                    with: "\n" + indent + indentUnit,
+                    caret: caret + 1 + (indent + indentUnit).count)
             }
             return
         }
@@ -1578,7 +2048,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         guard textView.isEditable, !textView.hasMarkedText() else { return }
         let text = textView.string as NSString
         let selection = textView.selectedRange()
-        let unit = Self.indentUnit
+        let unit = indentUnit
         if !outdent, selection.length == 0 {
             replace(
                 in: textView,

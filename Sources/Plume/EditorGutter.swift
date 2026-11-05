@@ -11,6 +11,9 @@ import AppKit
 final class EditorGutterView: NSView, NSViewToolTipOwner {
     weak var textView: NSTextView?
     weak var highlighter: SourceHighlighter?
+    /// The rendered diagnostics (host markers + syntax errors) for tooltip
+    /// lookups; nil-safe when the coordinator isn't wired yet.
+    weak var coordinator: EditorCoordinator?
     /// The content range of the line where a gutter drag started (nil when
     /// not dragging).
     private var dragAnchorRange: NSRange?
@@ -18,9 +21,9 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
     private var tooltipBounds: NSRect = .zero
     /// Vertical hairline between the gutter and the text (off by default).
     var showsSeparator = false
-    /// Lines (1-based) carrying a syntax error - drawn as red dots beside
-    /// the numbers.
-    var errorLines: Set<Int> = []
+    /// Lines (1-based) carrying a diagnostic, mapped to the most severe
+    /// marker on the line - drawn as a colored dot beside the numbers.
+    var lineSeverities: [Int: EditorMarkerSeverity] = [:]
     var font: NSFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
     private var scrollObserver: NSObjectProtocol?
@@ -63,14 +66,14 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         tooltipTag = addToolTip(bounds, owner: self, userData: nil)
     }
 
-    /// Hover over an error dot: the diagnostic's line and message.
+    /// Hover over a diagnostic dot: the line's worst marker, its message.
     func view(
         _ view: NSView,
         stringForToolTip tag: NSView.ToolTipTag,
         point: NSPoint,
         userData data: UnsafeMutableRawPointer?
     ) -> String {
-        guard let highlighter, !errorLines.isEmpty else { return "" }
+        guard let highlighter, !lineSeverities.isEmpty else { return "" }
         let line = highlighter.lineNumber(ofUTF16Offset: 0)
         _ = line
         let point = convert(point, from: nil)
@@ -85,17 +88,20 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         guard charRange.length > 0 else { return "" }
         let location = min(charRange.location, (textView.string as NSString).length - 1)
         let lineNumber = highlighter.lineNumber(ofUTF16Offset: location)
-        guard errorLines.contains(lineNumber) else { return "" }
-        // Find the first diagnostic that matches this line for a detailed message.
-        var message = "Syntax error"
-        for (range, msg) in highlighter.diagnostics() {
-            let lineNum = highlighter.lineNumber(ofUTF16Offset: range.location)
-            if lineNum == lineNumber {
-                message = msg
-                break
+        guard let severity = lineSeverities[lineNumber] else { return "" }
+        // The most severe entry on the line provides the message.
+        if let coordinator {
+            var best: DiagnosticEntry?
+            for entry in coordinator.diagnosticEntries {
+                guard highlighter.lineNumber(ofUTF16Offset: entry.range.location) == lineNumber else { continue }
+                if best == nil || best?.severity ?? .hint < entry.severity { best = entry }
+            }
+            if let best {
+                let label = best.severity == .error ? "" : "\(best.severity): "
+                return "\(label)\(best.message) (line \(lineNumber))"
             }
         }
-        return "line \(lineNumber): \(message)"
+        return "line \(lineNumber): \(severity)"
     }
 
     /// Starts following the text view's clip view (scroll ticks redraw).
@@ -111,6 +117,10 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.needsDisplay = true
+                // The cursor exclusion lives in the text view's scrolled
+                // content coordinates while the bars are pinned to the
+                // viewport - re-derive it on every scroll tick.
+                self?.coordinator?.refreshCursorExclusion()
             }
         }
     }
@@ -179,8 +189,8 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
             if highlighter.isLineStart(charRange.location) {
                 let number = highlighter.lineNumber(ofUTF16Offset: charRange.location)
                 drawNumber(number, forFragment: fragmentRect, in: textView, attributes: numberAttributes)
-                if errorLines.contains(number) {
-                    drawErrorDot(forFragment: fragmentRect, in: textView)
+                if let severity = lineSeverities[number] {
+                    drawMarkerDot(severity, forFragment: fragmentRect, in: textView)
                 }
             }
             index = NSMaxRange(fragmentGlyphs)
@@ -233,12 +243,10 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// A small red dot left of the number, marking a line with a syntax
-    /// error (see `SourceHighlighter.diagnostics`).
-
-    /// A small red dot left of the number, marking a line with a syntax
-    /// error (see `SourceHighlighter.diagnostics`).
-    private func drawErrorDot(forFragment fragmentRect: CGRect, in textView: NSTextView) {
+    /// A small colored dot left of the number, marking a line that carries
+    /// a diagnostic (host marker or syntax error); the color follows the
+    /// line's worst severity.
+    private func drawMarkerDot(_ severity: EditorMarkerSeverity, forFragment fragmentRect: CGRect, in textView: NSTextView) {
         let originInTextView = CGPoint(
             x: fragmentRect.minX + textView.textContainerOrigin.x,
             y: fragmentRect.minY + textView.textContainerOrigin.y)
@@ -249,7 +257,7 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
             y: origin.y + (fragmentRect.height - diameter) / 2,
             width: diameter,
             height: diameter)
-        NSColor(EditorTheme.error).setFill()
+        severity.nsColor.setFill()
         dot.fill()
     }
 

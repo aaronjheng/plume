@@ -9,6 +9,15 @@ struct EditorFindState: Equatable {
     var query = ""
     var replacement = ""
     var caseSensitive = false
+    /// Match a regular expression (Monaco find's `.*` toggle). In regex
+    /// mode the replacement carries `$1`-style capture templates.
+    var isRegex = false
+    /// Whole-word matches only (Monaco find's `ab` toggle): neither
+    /// neighbor of a match may be a word character.
+    var wholeWord = false
+    /// Shape the replacement's case after each match (Monaco's `AB`
+    /// toggle; literal mode only - regex replacements carry templates).
+    var preserveCase = false
 }
 
 /// Buttons/fields dispatch through this: the SwiftUI side sets a pending
@@ -41,6 +50,9 @@ struct EditorFindBar: View {
     @Binding var query: String
     @Binding var replacement: String
     @Binding var caseSensitive: Bool
+    @Binding var isRegex: Bool
+    @Binding var wholeWord: Bool
+    @Binding var preserveCase: Bool
     @Binding var replacing: Bool
     let matchCount: Int
     let matchIndex: Int?
@@ -55,33 +67,62 @@ struct EditorFindBar: View {
     @FocusState private var replaceFocused: Bool
 
     private let fieldWidth: CGFloat = 300
-    private let controlZoneWidth: CGFloat = 160
+    /// The match count's fixed slot (Monaco: `MAX_MATCHES_COUNT_WIDTH`,
+    /// 69px) - reserved so the widget never shifts as the label changes.
+    private let countWidth: CGFloat = 68
+
+    /// The widget card's size, MIRRORED from `body`'s fixed layout:
+    /// chevron(20) + field(300) + count(68) + three 20pt buttons at
+    /// spaceXSmall gaps, plus the card's spaceSmall padding - and the
+    /// replace row (26pt field + 6pt gap) when toggled.
+    /// `EditorRepresentable.updateNSView` places the cursor exclusion from
+    /// this (no SwiftUI measurement round-trip); keep the two in sync.
+    static func cardSize(replacing: Bool) -> CGSize {
+        let row: CGFloat = 20 + 4 + 300 + 4 + 68 + 4 + 20 + 4 + 20 + 4 + 20
+        let contentHeight: CGFloat = replacing ? 26 + 6 + 26 : 26
+        return CGSize(
+            width: row + 2 * EditorTheme.spaceSmall,
+            height: contentHeight + 2 * EditorTheme.spaceSmall)
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: EditorTheme.spaceCompact) {
-            VStack(alignment: .leading, spacing: 6) {
-                findField
-                if replacing {
-                    replaceField
-                }
+        HStack(alignment: .center, spacing: EditorTheme.spaceXSmall) {
+            // Monaco's Toggle Replace (`.button.toggle`) sits at the
+            // widget's leading edge - a chevron that points right while the
+            // replace row is collapsed and down while it is open.
+            hoverButton(
+                "Toggle Replace", isActive: replacing,
+                help: replacing ? "Hide Replace" : "Show Replace",
+                systemImage: replacing ? "chevron.down" : "chevron.right"
+            ) {
+                replacing.toggle()
             }
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
+                // Monaco's find-part order: input (with the option toggles
+                // nested inside its trailing edge), match count,
+                // previous/next, then close. Nothing sits between the input
+                // and its toggles, so there is no dead middle in the bar.
+                HStack(spacing: EditorTheme.spaceXSmall) {
+                    findField
                     countLabel
-                        .frame(width: 56, alignment: .trailing)
-                    hoverButton("Aa", isActive: caseSensitive, help: "Match case") {
-                        caseSensitive.toggle()
-                    }
+                        .frame(width: countWidth, alignment: .trailing)
                     hoverButton(
-                        "chevron.up", isActive: false, help: "Previous (Shift-Return)",
-                        disabled: matchCount == 0, action: onPrevious)
+                        "Previous match", isActive: false, help: "Previous (Shift-Return)",
+                        disabled: matchCount == 0, systemImage: "chevron.up", action: onPrevious)
                     hoverButton(
-                        "chevron.down", isActive: false, help: "Next (Return)",
-                        disabled: matchCount == 0, action: onNext)
+                        "Next match", isActive: false, help: "Next (Return)",
+                        disabled: matchCount == 0, systemImage: "chevron.down", action: onNext)
+                    hoverButton(
+                        "Close find bar", isActive: false, help: "Close (Esc)",
+                        systemImage: "xmark", action: onClose)
                 }
-                .frame(width: controlZoneWidth, alignment: .trailing)
+                // Monaco's replace-part: the replace input (with `AB`
+                // nested inside) then Replace / Replace All, starting at
+                // the same x as the find row's count because both inputs
+                // share a width.
                 if replacing {
-                    HStack(spacing: 4) {
+                    HStack(spacing: EditorTheme.spaceXSmall) {
+                        replaceField
                         Button("Replace", action: onReplace)
                             .buttonStyle(EditorSecondaryButtonStyle(minHeight: 24))
                             .disabled(!isEditable || matchCount == 0)
@@ -91,24 +132,6 @@ struct EditorFindBar: View {
                             .disabled(!isEditable || matchCount == 0)
                             .help("Replace all matches (⌘⌥⇧F)")
                     }
-                    .frame(width: controlZoneWidth, alignment: .trailing)
-                }
-            }
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 4) {
-                    EditorToolbarToggleButton(
-                        systemImage: "text.magnifyingglass",
-                        isOn: replacing,
-                        help: replacing ? "Hide Replace" : "Show Replace"
-                    ) {
-                        replacing.toggle()
-                    }
-                    Button("Done", action: onClose)
-                        .buttonStyle(EditorSecondaryButtonStyle(minHeight: 24))
-                        .help("Close find bar (Esc)")
-                }
-                if replacing {
-                    Color.clear.frame(height: 24)
                 }
             }
         }
@@ -139,90 +162,127 @@ struct EditorFindBar: View {
     }
 
     private var findField: some View {
-        field(text: $query, prompt: "Find", focused: findFocused)
-            .focused($findFocused)
-            .onSubmit(onNext)
-            .onExitCommand { onClose() }
+        field(text: $query, prompt: "Find", focused: findFocused) {
+            HStack(spacing: 2) {
+                hoverButton("Aa", isActive: caseSensitive, help: "Match Case") {
+                    caseSensitive.toggle()
+                }
+                hoverButton("ab", isActive: wholeWord, help: "Match Whole Word") {
+                    wholeWord.toggle()
+                }
+                hoverButton(".*", isActive: isRegex, help: "Use Regular Expression ($1 in replacement)") {
+                    isRegex.toggle()
+                }
+            }
+        }
+        .focused($findFocused)
+        .onSubmit(onNext)
+        .onExitCommand { onClose() }
     }
 
     private var replaceField: some View {
-        field(text: $replacement, prompt: "Replace with", focused: replaceFocused)
-            .focused($replaceFocused)
-            .onSubmit(onReplace)
-            .onExitCommand { onClose() }
+        field(text: $replacement, prompt: "Replace with", focused: replaceFocused) {
+            hoverButton("AB", isActive: preserveCase, help: "Preserve Case (literal mode)") {
+                preserveCase.toggle()
+            }
+        }
+        .focused($replaceFocused)
+        .onSubmit(onReplace)
+        .onExitCommand { onClose() }
     }
 
-    private func field(text: Binding<String>, prompt: String, focused: Bool) -> some View {
-        TextField(prompt, text: text)
-            .font(EditorTheme.fontMonoSubheadline)
-            .textFieldStyle(.plain)
-            .focusEffectDisabled()
-            .padding(.horizontal, EditorTheme.spaceCompact)
-            .frame(width: fieldWidth, height: 26)
-            .background(
-                RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
-                    .fill(EditorTheme.fieldBackground)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
-                    .strokeBorder(
-                        focused ? EditorTheme.accent : EditorTheme.border,
-                        lineWidth: focused ? EditorTheme.lineFocusedField : EditorTheme.lineField
-                    )
-            )
+    /// One input of the bar: the text field with its option toggles as
+    /// SIBLINGS inside the bordered box (Monaco's `.monaco-findInput` is
+    /// the inputbox plus its `.controls`). Siblings rather than an overlay
+    /// on the field: an `NSTextField`-backed view keeps its own cursor
+    /// over its whole bounds, so an overlay's pointer style never applies
+    /// and its buttons stay stuck on the arrow cursor.
+    private func field<Accessory: View>(
+        text: Binding<String>,
+        prompt: String,
+        focused: Bool,
+        @ViewBuilder accessory: () -> Accessory
+    ) -> some View {
+        HStack(spacing: 2) {
+            TextField(prompt, text: text)
+                .font(EditorTheme.fontMonoSubheadline)
+                .textFieldStyle(.plain)
+                .focusEffectDisabled()
+                .padding(.leading, EditorTheme.spaceCompact)
+            accessory()
+                .padding(.trailing, EditorTheme.spaceCompact)
+        }
+        .frame(width: fieldWidth, height: 26)
+        .background(
+            RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
+                .fill(EditorTheme.fieldBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
+                .strokeBorder(
+                    focused ? EditorTheme.accent : EditorTheme.border,
+                    lineWidth: focused ? EditorTheme.lineFocusedField : EditorTheme.lineField
+                )
+        )
     }
 
+    /// Monaco always renders a count label - `No results` when nothing
+    /// matches - so the reserved slot is never an empty hole, and its fixed
+    /// width keeps the widget from shifting as the label changes. The
+    /// error tint applies only once a query exists (`no-results`), not to
+    /// the untouched state.
     @ViewBuilder
     private var countLabel: some View {
-        if query.isEmpty {
-            Text(" ")
-                .font(EditorTheme.fontSmall.monospacedDigit())
-        } else if matchCount == 0 {
+        if matchCount == 0 {
             Text("No results")
                 .font(EditorTheme.fontSmall)
-                .foregroundStyle(EditorTheme.error)
-        } else if let matchIndex {
-            Text("\(matchIndex + 1)/\(matchCount)")
-                .font(EditorTheme.fontSmall.monospacedDigit())
-                .foregroundStyle(EditorTheme.textSecondary)
+                .foregroundStyle(query.isEmpty ? EditorTheme.textSecondary : EditorTheme.error)
         } else {
-            Text("\(matchCount) found")
-                .font(EditorTheme.fontSmall)
+            // Monaco's label is `NLS_MATCHES_LOCATION` = "{0} of {1}",
+            // with "?" standing in for the position while no match is
+            // current (`matchesPosition === '0'`).
+            Text("\(matchIndex.map { String($0 + 1) } ?? "?") of \(matchCount)")
+                .font(EditorTheme.fontSmall.monospacedDigit())
                 .foregroundStyle(EditorTheme.textSecondary)
         }
     }
 
-    /// The bar's quiet square button (Aa, chevrons): hover fill, on-state
-    /// accent tint, disabled dim - the shared icon-button language.
+    /// The bar's quiet square button (Aa, ab, .*, chevrons): hover fill,
+    /// on-state accent tint, disabled dim - the shared icon-button language.
+    /// `systemImage` renders a real glyph (the chevrons); otherwise the
+    /// label is drawn as text (the find-option toggles).
+    /// One icon button of the bar. The chip chrome (20pt frame, checked
+    /// fill + border, hover fill) and the pointer style both live in
+    /// `EditorIconButtonStyle` - see its note on why the cursor cannot be
+    /// attached to the `Button` here.
     private func hoverButton(
         _ label: String,
         isActive: Bool,
         help: String,
         disabled: Bool = false,
+        systemImage: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Text(label)
-                .font(EditorTheme.fontSmall.weight(isActive ? .semibold : .regular))
-                .foregroundStyle(
-                    isActive ? EditorTheme.accent : EditorTheme.textSecondary
-                )
-                .frame(width: 24, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: EditorTheme.radiusSmall)
-                        .fill(isActive ? EditorTheme.subtleBackground : .clear)
-                )
-                .contentShape(Rectangle())
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(EditorTheme.fontIconCompact)
+            } else {
+                Text(label)
+                    .font(EditorTheme.fontSmall.weight(isActive ? .semibold : .regular))
+            }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(EditorIconButtonStyle(isActive: isActive))
         .disabled(disabled)
-        .opacity(disabled ? EditorTheme.opacityDisabled : 1)
         .help(help)
+        .accessibilityLabel(label)
     }
 }
 
 /// The go-to-line mini panel (⌥⌘L): a number field and a Go button,
-/// matching the find bar's overlay language.
+/// matching the find bar's overlay language. Accepts `line` or
+/// `line:column` (Monaco's quick-input format); the column is clamped to
+/// the line's content.
 struct EditorGoToLineBar: View {
     @Binding var text: String
     let lineCount: Int
@@ -230,6 +290,27 @@ struct EditorGoToLineBar: View {
     let onSubmit: () -> Void
 
     @FocusState private var focused: Bool
+
+    /// Parses `12` or `12:5`; nil when the field is not (yet) valid.
+    static func parse(_ text: String) -> (line: Int, column: Int?)? {
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard let first = parts.first, let line = Int(first), line > 0 else { return nil }
+        if parts.count == 2 {
+            guard let column = Int(parts[1]), column > 0 else { return nil }
+            return (line, column)
+        }
+        guard parts.count == 1 else { return nil }
+        return (line, nil)
+    }
+
+    /// The panel card's size, MIRRORED from `body` (label + 110pt field +
+    /// Go button, spaceXSmall gaps, spaceSmall card padding), with a
+    /// generous width since the Go button's is text-driven. Used by
+    /// `EditorRepresentable.updateNSView` for the cursor exclusion; keep
+    /// the two in sync.
+    static func cardSize() -> CGSize {
+        CGSize(width: 240, height: 26 + 2 * EditorTheme.spaceSmall)
+    }
 
     var body: some View {
         HStack(spacing: EditorTheme.spaceXSmall) {
@@ -244,8 +325,19 @@ struct EditorGoToLineBar: View {
                 .onSubmit(onSubmit)
                 .onExitCommand { onClose() }
                 .onChange(of: text) { _, newValue in
-                    let digitsOnly = newValue.filter { $0.isNumber }
-                    text = digitsOnly
+                    // Digits plus at most one colon (after a digit): the
+                    // Monaco quick-input shape.
+                    var filtered = ""
+                    var seenColon = false
+                    for character in newValue {
+                        if character.isNumber {
+                            filtered.append(character)
+                        } else if character == ":", !seenColon, !filtered.isEmpty {
+                            seenColon = true
+                            filtered.append(character)
+                        }
+                    }
+                    if filtered != newValue { text = filtered }
                 }
                 .padding(.horizontal, EditorTheme.spaceCompact)
                 .frame(width: 110, height: 26)
@@ -256,11 +348,12 @@ struct EditorGoToLineBar: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
                         .strokeBorder(
-                            (text.isEmpty || Int(text) != nil)
+                            (text.isEmpty || Self.parse(text) != nil)
                                 ? EditorTheme.accent : EditorTheme.error,
                             lineWidth: EditorTheme.lineFocusedField
                         )
                 )
+                .help("Line, or line:column (e.g. 12:5)")
             Button("Go", action: onSubmit)
                 .buttonStyle(EditorSecondaryButtonStyle(minHeight: 24))
         }
@@ -307,7 +400,8 @@ extension EditorCoordinator {
             return
         }
         findMatches = Self.findMatches(
-            in: textView.string, query: state.query, caseSensitive: state.caseSensitive)
+            in: textView.string, query: state.query, caseSensitive: state.caseSensitive,
+            isRegex: state.isRegex, wholeWord: state.wholeWord)
         let caret = textView.selectedRange().location
         if selectFirstAfterCaret {
             // Query changed: select the first match at/after the caret
@@ -337,6 +431,7 @@ extension EditorCoordinator {
         textView.layoutManager?.removeTemporaryAttribute(
             .backgroundColor, forCharacterRange: NSRange(location: 0, length: length))
         parent.findHooks?.countChanged(0, nil)
+        rootView?.rulerView?.needsDisplay = true
     }
 
     private func applyFindHighlights(in textView: NSTextView) {
@@ -355,23 +450,96 @@ extension EditorCoordinator {
                 value: index == findCurrentIndex ? currentWash : wash,
                 forCharacterRange: range)
         }
+        rootView?.rulerView?.needsDisplay = true
     }
 
-    /// All occurrences of `query`, non-overlapping, in order.
-    static func findMatches(in text: String, query: String, caseSensitive: Bool) -> [NSRange] {
+    /// All occurrences of `query`, non-overlapping, in order. Literal
+    /// mode scans with NSString; regex mode enumerates
+    /// `NSRegularExpression` matches (nil pattern = no matches, the bar's
+    /// count reads "No results"). `wholeWord` filters both modes by the
+    /// neighbors' word-character status.
+    static func findMatches(
+        in text: String, query: String, caseSensitive: Bool, isRegex: Bool, wholeWord: Bool
+    ) -> [NSRange] {
         guard !query.isEmpty else { return [] }
         let ns = text as NSString
         var ranges: [NSRange] = []
-        var searchRange = NSRange(location: 0, length: ns.length)
+        let length = ns.length
+        if isRegex {
+            guard
+                let regex = try? NSRegularExpression(
+                    pattern: query,
+                    options: caseSensitive ? [] : [.caseInsensitive])
+            else { return [] }
+            regex.enumerateMatches(in: text, range: NSRange(location: 0, length: length)) { match, _, _ in
+                guard let match else { return }
+                if !wholeWord || Self.isWholeWord(ns, match.range) {
+                    ranges.append(match.range)
+                }
+            }
+            return ranges
+        }
+        var searchRange = NSRange(location: 0, length: length)
         let options: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
         while searchRange.length > 0 {
             let found = ns.range(of: query, options: options, range: searchRange)
             guard found.location != NSNotFound else { break }
-            ranges.append(found)
+            if !wholeWord || Self.isWholeWord(ns, found) {
+                ranges.append(found)
+            }
             searchRange.location = NSMaxRange(found)
-            searchRange.length = ns.length - searchRange.location
+            searchRange.length = length - searchRange.location
         }
         return ranges
+    }
+
+    /// Neither neighbor of `range` may be a word character (letters,
+    /// digits, underscore).
+    private static func isWholeWord(_ text: NSString, _ range: NSRange) -> Bool {
+        let beforeClean =
+            range.location == 0
+            || !isWordChar(codeEditorChar(text, range.location - 1))
+        let afterClean =
+            NSMaxRange(range) >= text.length
+            || !isWordChar(codeEditorChar(text, NSMaxRange(range)))
+        return beforeClean && afterClean
+    }
+
+    /// Shapes `replacement` after `matched`'s case (Monaco's preserve
+    /// case): all-uppercase match -> uppercase replacement, capitalized
+    /// match -> capitalized replacement, otherwise as typed.
+    static func preservingCase(_ matched: String, _ replacement: String) -> String {
+        guard !matched.isEmpty, !replacement.isEmpty else { return replacement }
+        if matched == matched.uppercased(), matched != matched.lowercased() {
+            return replacement.uppercased()
+        }
+        if let first = matched.first, first.isUppercase,
+            matched.dropFirst() == matched.dropFirst().lowercased()
+        {
+            return replacement.prefix(1).uppercased() + replacement.dropFirst()
+        }
+        return replacement
+    }
+
+    /// The replacement for one match: regex mode templates `$1` against
+    /// the pre-edit text; literal mode honors preserve case.
+    static func replacementText(
+        for range: NSRange, in text: String, state: EditorFindState
+    ) -> String {
+        let ns = text as NSString
+        guard ns.length >= NSMaxRange(range) else { return state.replacement }
+        if state.isRegex,
+            let regex = try? NSRegularExpression(
+                pattern: state.query,
+                options: state.caseSensitive ? [] : [.caseInsensitive])
+        {
+            guard let match = regex.firstMatch(in: text, range: range) else {
+                return state.replacement
+            }
+            return regex.replacementString(for: match, in: text, offset: 0, template: state.replacement)
+        }
+        guard state.preserveCase else { return state.replacement }
+        return preservingCase(ns.substring(with: range), state.replacement)
     }
 
     func performFindAction(_ action: EditorFindAction, in textView: NSTextView) {
@@ -406,7 +574,8 @@ extension EditorCoordinator {
     func replaceCurrent(in textView: NSTextView) {
         guard textView.isEditable, let index = findCurrentIndex, index < findMatches.count else { return }
         let range = findMatches[index]
-        let replacement = parent.find.replacement
+        let replacement = Self.replacementText(
+            for: range, in: textView.string, state: parent.find)
         guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
         textView.textStorage?.replaceCharacters(in: range, with: replacement)
         textView.didChangeText()
@@ -422,10 +591,15 @@ extension EditorCoordinator {
 
     func replaceAll(in textView: NSTextView) {
         guard textView.isEditable, !findMatches.isEmpty else { return }
-        let replacement = parent.find.replacement
+        let state = parent.find
+        let original = textView.string
+        // Capture-templates resolve against the pre-edit text, so every
+        // replacement is computed before the first storage edit.
+        let replacements = findMatches.map { Self.replacementText(for: $0, in: original, state: state) }
         let undoManager = textView.undoManager
         undoManager?.beginUndoGrouping()
-        for range in findMatches.reversed() {
+        for (index, range) in findMatches.reversed().enumerated() {
+            let replacement = replacements[findMatches.count - 1 - index]
             guard textView.shouldChangeText(in: range, replacementString: replacement) else { continue }
             textView.textStorage?.replaceCharacters(in: range, with: replacement)
         }
