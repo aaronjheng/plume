@@ -18,6 +18,11 @@ struct EditorFindState: Equatable {
     /// Shape the replacement's case after each match (Monaco's `AB`
     /// toggle; literal mode only - regex replacements carry templates).
     var preserveCase = false
+    /// Scope matches to the captured selection.
+    var inSelection = false
+    /// Captured scope (UTF-16 offsets into the document).
+    var scopeLocation = 0
+    var scopeLength = 0
 }
 
 /// Buttons/fields dispatch through this: the SwiftUI side sets a pending
@@ -28,13 +33,14 @@ enum EditorFindAction {
     case previous
     case replaceCurrent
     case replaceAll
+    case toggleInSelection
 }
 
 /// AppKit → SwiftUI callbacks: ⌘F opening the bar (with the selection as
 /// the prefill and whether the replace row shows), match count/index
 /// updates, Esc closing the bar.
 struct EditorFindHooks {
-    let requested: (String?, Bool) -> Void
+    let requested: (String?, NSRange?, Bool) -> Void
     let countChanged: (Int, Int?) -> Void
     let closed: () -> Void
     /// ⌥⌘E: adopt the selection as the find query (bar stays closed).
@@ -386,7 +392,8 @@ extension EditorCoordinator {
             if wasVisible || !findMatches.isEmpty { clearFind(in: textView) }
             return
         }
-        refreshFindHighlights(in: textView, selectFirstAfterCaret: true)
+        refreshFindHighlights(
+            in: textView, selectFirstAfterCaret: parent.findCursorMoveOnType)
     }
 
     func refreshFindHighlights(in textView: NSTextView) {
@@ -399,9 +406,7 @@ extension EditorCoordinator {
             clearFind(in: textView)
             return
         }
-        findMatches = Self.findMatches(
-            in: textView.string, query: state.query, caseSensitive: state.caseSensitive,
-            isRegex: state.isRegex, wholeWord: state.wholeWord)
+        findMatches = Self.scopedFindMatches(in: textView.string, state: state)
         let caret = textView.selectedRange().location
         if selectFirstAfterCaret {
             // Query changed: select the first match at/after the caret
@@ -451,6 +456,30 @@ extension EditorCoordinator {
                 forCharacterRange: range)
         }
         rootView?.rulerView?.needsDisplay = true
+    }
+
+    /// Scoped to the captured selection when `inSelection` is on,
+    /// otherwise the whole document.
+    static func scopedFindMatches(in text: String, state: EditorFindState) -> [NSRange] {
+        guard !state.query.isEmpty else { return [] }
+        let ns = text as NSString
+        guard state.inSelection, state.scopeLength > 0 else {
+            return findMatches(
+                in: text, query: state.query, caseSensitive: state.caseSensitive,
+                isRegex: state.isRegex, wholeWord: state.wholeWord)
+        }
+        let scope = NSRange(
+            location: min(max(state.scopeLocation, 0), ns.length),
+            length: min(
+                state.scopeLength,
+                max(0, ns.length - min(max(state.scopeLocation, 0), ns.length))))
+        guard scope.length > 0 else { return [] }
+        let substring = ns.substring(with: scope)
+        return findMatches(
+            in: substring, query: state.query, caseSensitive: state.caseSensitive,
+            isRegex: state.isRegex, wholeWord: state.wholeWord
+        )
+        .map { NSRange(location: $0.location + scope.location, length: $0.length) }
     }
 
     /// All occurrences of `query`, non-overlapping, in order. Literal
@@ -548,12 +577,19 @@ extension EditorCoordinator {
         case .previous: findPrevious(in: textView)
         case .replaceCurrent: replaceCurrent(in: textView)
         case .replaceAll: replaceAll(in: textView)
+        case .toggleInSelection: toggleFindInSelection(in: textView)
         }
     }
 
     func findNext(in textView: NSTextView) {
         guard !findMatches.isEmpty else { return }
-        let next = ((findCurrentIndex ?? -1) + 1) % findMatches.count
+        let current = findCurrentIndex ?? -1
+        let next: Int
+        if parent.findLoops {
+            next = (current + 1) % findMatches.count
+        } else {
+            next = min(current + 1, findMatches.count - 1)
+        }
         findCurrentIndex = next
         applyFindHighlights(in: textView)
         textView.setSelectedRange(findMatches[next])
@@ -563,7 +599,13 @@ extension EditorCoordinator {
 
     func findPrevious(in textView: NSTextView) {
         guard !findMatches.isEmpty else { return }
-        let previous = ((findCurrentIndex ?? findMatches.count) - 1 + findMatches.count) % findMatches.count
+        let current = findCurrentIndex ?? findMatches.count
+        let previous: Int
+        if parent.findLoops {
+            previous = (current - 1 + findMatches.count) % findMatches.count
+        } else {
+            previous = max(current - 1, 0)
+        }
         findCurrentIndex = previous
         applyFindHighlights(in: textView)
         textView.setSelectedRange(findMatches[previous])
@@ -613,15 +655,48 @@ extension EditorCoordinator {
         parent.findHooks?.countChanged(findMatches.count, findCurrentIndex)
     }
 
-    /// ⌘F: opens the bar, prefilling the query with the selection.
+    /// ⌘F: opens the bar, prefilling the query with the selection (per
+    /// `seedSearchStringFromSelection`); scope optional per
+    /// `autoFindInSelection`.
     func requestFind(replaceMode: Bool, in textView: NSTextView) {
         let selection = textView.selectedRange()
         var selectedText: String?
-        if selection.length > 0, selection.length <= 200 {
-            let substring = (textView.string as NSString).substring(with: selection)
-            if !substring.contains("\n") { selectedText = substring }
+        switch parent.seedSearchStringFromSelection {
+        case .never:
+            selectedText = nil
+        case .always:
+            if selection.length > 0, selection.length <= 200 {
+                selectedText = (textView.string as NSString).substring(with: selection)
+            }
+        case .selection:
+            if selection.length > 0, selection.length <= 200 {
+                let substring = (textView.string as NSString).substring(with: selection)
+                if !substring.contains("\n") { selectedText = substring }
+            }
         }
-        parent.findHooks?.requested(selectedText, replaceMode)
+        let scope: NSRange?
+        switch parent.autoFindInSelection {
+        case .never:
+            scope = nil
+        case .always:
+            scope = selection.length > 0 ? selection : nil
+        case .multiline:
+            let substring =
+                selection.length > 0
+                ? (textView.string as NSString).substring(with: selection) : ""
+            scope = substring.contains("\n") ? selection : nil
+        }
+        parent.findHooks?.requested(selectedText, scope, replaceMode)
+    }
+
+    /// ⌥⌘G: toggle find-in-selection, capturing the live selection.
+    func toggleFindInSelection(in textView: NSTextView) {
+        let selection = textView.selectedRange()
+        let query = parent.find.query
+        parent.findHooks?.requested(
+            query.isEmpty ? nil : query,
+            selection.length > 0 ? selection : nil,
+            parent.find.replacing)
     }
 
     func closeFind(in textView: NSTextView) {

@@ -461,6 +461,15 @@ extension EditorCoordinator {
         }
 
         let style = NSNumber(value: NSUnderlineStyle.patternDash.rawValue)
+        // Monaco: renderValidationDecorations — squiggles only when the
+        // mode says so (.editable tracks the editor's editability); gutter
+        // dots and tooltips always reflect the real diagnostics.
+        let showDecorations: Bool
+        switch parent.renderValidationDecorations {
+        case .off: showDecorations = false
+        case .editable: showDecorations = textView.isEditable
+        case .on: showDecorations = true
+        }
         var lineSeverities: [Int: EditorMarkerSeverity] = [:]
         var underlineRanges: [NSRange] = []
         for entry in entries where underlineRanges.count < 20 {
@@ -475,7 +484,7 @@ extension EditorCoordinator {
             } else {
                 lineSeverities[line] = entry.severity
             }
-            if intersectsMarked(squiggle) { continue }
+            guard showDecorations, !intersectsMarked(squiggle) else { continue }
             layoutManager.addTemporaryAttribute(.underlineStyle, value: style, forCharacterRange: squiggle)
             layoutManager.addTemporaryAttribute(
                 .underlineColor, value: entry.severity.nsColor, forCharacterRange: squiggle)
@@ -489,6 +498,9 @@ extension EditorCoordinator {
             gutter.needsDisplay = true
         }
         rootView?.rulerView?.needsDisplay = true
+        // Clickable links re-scan with the same cadence as the squiggles
+        // (Monaco: links): after every edit, over the fresh layout.
+        applyLinks(in: textView)
     }
 }
 

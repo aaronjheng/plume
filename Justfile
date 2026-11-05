@@ -15,9 +15,6 @@ format-check:
 build:
     swift build -c release
 
-test:
-    swift test
-
 clean:
     swift package clean
     rm -rf .build .swiftpm

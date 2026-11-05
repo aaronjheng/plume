@@ -175,9 +175,31 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
         let textLength = (textView.string as NSString).length
 
+        // Caret-line strip (Monaco: renderLineHighlight "gutter"/"all"):
+        // the caret's line number draws in the accent color. Off for
+        // .none/.line, and when the editor is unfocused under
+        // renderLineHighlightOnlyWhenFocus.
+        var caretLineNumber: Int?
+        if let coordinator,
+            coordinator.parent.renderLineHighlight == .gutter
+                || coordinator.parent.renderLineHighlight == .all
+        {
+            let focusOK =
+                !coordinator.parent.renderLineHighlightOnlyWhenFocus
+                || textView.window?.firstResponder === textView
+            if focusOK {
+                let caret = min(textView.selectedRange().location, max(textLength, 0))
+                caretLineNumber = highlighter.lineNumber(ofUTF16Offset: caret)
+            }
+        }
+
         let numberAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor(EditorTheme.textSecondary),
+        ]
+        let caretAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor(EditorTheme.accent),
         ]
         var index = glyphRange.location
         let end = NSMaxRange(glyphRange)
@@ -188,7 +210,9 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
             // Only the fragment that opens a line carries the number.
             if highlighter.isLineStart(charRange.location) {
                 let number = highlighter.lineNumber(ofUTF16Offset: charRange.location)
-                drawNumber(number, forFragment: fragmentRect, in: textView, attributes: numberAttributes)
+                drawNumber(
+                    number, forFragment: fragmentRect, in: textView,
+                    attributes: number == caretLineNumber ? caretAttributes : numberAttributes)
                 if let severity = lineSeverities[number] {
                     drawMarkerDot(severity, forFragment: fragmentRect, in: textView)
                 }
@@ -207,7 +231,7 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
                 line,
                 forFragment: layoutManager.extraLineFragmentRect,
                 in: textView,
-                attributes: numberAttributes)
+                attributes: line == caretLineNumber ? caretAttributes : numberAttributes)
         }
     }
 

@@ -33,6 +33,18 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
 - **Indentation & wrapping** (Monaco options): `tabSize`/`insertSpaces`/
   `detectIndentation` (indent guides track literal tabs too), `wordWrap`
   (`.on`/`.off`/`.column(n)`), and go-to-line accepting `line:column`.
+- **Rendering options** (Monaco options): `rulers`, `renderLineHighlight`
+  (`.none`/`.gutter`/`.line`/`.all` + only-when-focus), `renderWhitespace`
+  (`.none`/`.trailing`/`.boundary`/`.selection`/`.all`),
+  `renderControlCharacters` + `unicodeHighlight`,
+  `renderValidationDecorations`, `scrollBeyondLastLine`/`Column`,
+  `editorPadding`, `cursorStyle`/`cursorWidth`/`cursorBlinking`,
+  `links` (URL runs open on click), `dragAndDropEnabled`, and
+  `readOnlyMessage` (a capsule surfaces it when a read-only edit is
+  attempted; `onReadOnlyAttempt` forwards it).
+- **Find/replace options** (Monaco options): `seedSearchStringFromSelection`,
+  `findLoops`, `findCursorMoveOnType`, `autoFindInSelection` (+ ⌥⌘G to
+  toggle find-in-selection live).
 - **Language-service hooks** (the Monaco set that makes sense embedded):
   completions (`suggestFactory` + `triggerCharacters`), hovers
   (`hoverProvider`), markers (`markers`), formatting (`formatHandler`),
