@@ -230,7 +230,7 @@ extension EditorCoordinator {
         }
         guard let anchor, let match = bracketMatch(in: text, at: anchor) else { return }
         textView.setSelectedRange(NSRange(location: match, length: 1))
-        textView.scrollRangeToVisible(NSRange(location: match, length: 1))
+        reveal(NSRange(location: match, length: 1), in: textView)
     }
 
     static func isBracket(_ character: Character?) -> Bool {
@@ -318,7 +318,7 @@ extension EditorCoordinator {
             location = min(location + min(max(column, 1) - 1, maxColumn), length)
         }
         textView.setSelectedRange(NSRange(location: location, length: 0))
-        textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+        reveal(NSRange(location: location, length: 0), in: textView)
     }
 
     /// ⌥⌘E: the selection becomes the find query (the bar stays closed; the
@@ -363,6 +363,41 @@ extension EditorCoordinator {
     /// Double-click/selection helper: when the selection is a bare word
     /// (letters, digits, underscore, ≤64 chars), washes every occurrence.
     /// Suspended while the find bar owns the background washes.
+    /// Scroll `range` into view, then honor `cursorSurroundingLines`
+    /// (Monaco: `cursorSurroundingLines`): jump targets keep N of their
+    /// lines visible above and below instead of hugging the edge.
+    func reveal(_ range: NSRange, in textView: NSTextView) {
+        textView.scrollRangeToVisible(range)
+        let surrounding = parent.cursorSurroundingLines
+        guard surrounding > 0, let layoutManager = textView.layoutManager,
+            let container = textView.textContainer,
+            let clip = textView.enclosingScrollView?.contentView
+        else { return }
+        let length = (textView.string as NSString).length
+        let glyph = layoutManager.glyphIndexForCharacter(at: min(range.location, length))
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let caretTop = fragment.minY + textView.textContainerOrigin.y
+        let lineHeight = max(fragment.height, 1)
+        let visible = textView.visibleRect
+        let linesAbove = (caretTop - visible.minY) / lineHeight
+        let linesBelow = (visible.maxY - caretTop - lineHeight) / lineHeight
+        var originY = visible.minY
+        if linesAbove < CGFloat(surrounding) {
+            originY = caretTop - CGFloat(surrounding) * lineHeight - lineHeight / 4
+        } else if linesBelow < CGFloat(surrounding) {
+            originY =
+                caretTop + lineHeight + CGFloat(surrounding) * lineHeight
+                - visible.height + lineHeight / 4
+        }
+        let documentHeight =
+            layoutManager.usedRect(for: container).height
+            + textView.textContainerInset.height * 2
+        originY = min(max(originY, 0), max(documentHeight - visible.height, 0))
+        if abs(originY - visible.minY) > 0.5 {
+            clip.setBoundsOrigin(NSPoint(x: visible.minX, y: originY))
+        }
+    }
+
     func updateWordHighlight(in textView: NSTextView) {
         guard let layoutManager = textView.layoutManager else { return }
         let length = (textView.string as NSString).length
@@ -487,7 +522,7 @@ extension EditorCoordinator {
 
     private func applySmartSelection(_ range: NSRange, in textView: NSTextView) {
         textView.setSelectedRange(range)
-        textView.scrollRangeToVisible(range)
+        reveal(range, in: textView)
     }
 
     /// The expansion chain: the seed selection, then every strictly

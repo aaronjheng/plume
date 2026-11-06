@@ -17,6 +17,59 @@ public enum WhitespaceMode: Equatable, Sendable {
     case selection
 }
 
+/// Final-newline pilcrow (Monaco: `renderFinalNewline`).
+public enum EditorFinalNewlineMode: Equatable, Sendable {
+    /// Always draw a faint ¶ at the final newline.
+    case on
+    /// Never (Plume's historic behavior).
+    case off
+    /// Only while the caret sits on the last line.
+    case boundary
+}
+
+/// Selection position snapshot for `onSelectionChange`
+/// (Monaco: `onDidChangeCursorPosition`).
+public struct EditorSelectionSnapshot: Equatable, Sendable {
+    /// 1-based caret line.
+    public let line: Int
+    /// 1-based caret column.
+    public let column: Int
+    /// Selection length in UTF-16 units.
+    public let length: Int
+
+    public init(line: Int, column: Int, length: Int) {
+        self.line = line
+        self.column = column
+        self.length = length
+    }
+}
+
+/// Host-registered action (Monaco: `addAction`): a context-menu entry
+/// with an optional key equivalent, run through the editor's responder.
+public struct EditorAction: @unchecked Sendable {
+    public let id: String
+    public let title: String
+    /// Key-equivalent character (e.g. "k"), or nil for menu-only.
+    public let key: String?
+    /// Exact modifier mask for the key equivalent.
+    public let modifiers: NSEvent.ModifierFlags
+    public let run: @MainActor @Sendable () -> Void
+
+    public init(
+        id: String,
+        title: String,
+        key: String? = nil,
+        modifiers: NSEvent.ModifierFlags = [],
+        run: @escaping @MainActor @Sendable () -> Void
+    ) {
+        self.id = id
+        self.title = title
+        self.key = key
+        self.modifiers = modifiers
+        self.run = run
+    }
+}
+
 /// Line wrapping (Monaco: `wordWrap` + `wordWrapColumn`, with the
 /// `wordWrapColumn`/`bounded` distinction collapsed into one case).
 public enum EditorWordWrap: Equatable, Sendable {
@@ -256,6 +309,31 @@ public struct Editor: View {
     var linksEnabled: Bool = false
     /// Accept drag-and-drop drops onto the text.
     var dragAndDropEnabled: Bool = true
+    /// Final-newline pilcrow (Monaco: `renderFinalNewline`).
+    var renderFinalNewline: EditorFinalNewlineMode = .off
+    /// Hairline between text and the overview ruler (Monaco:
+    /// `overviewRulerBorder`).
+    var overviewRulerBorder: Bool = true
+    /// Hide the caret tick in the overview ruler (Monaco:
+    /// `hideCursorInOverviewRuler`).
+    var hideCursorInOverviewRuler: Bool = false
+    /// Lines kept visible around the caret on jumps (Monaco:
+    /// `cursorSurroundingLines`). Zero keeps the historic behavior.
+    var cursorSurroundingLines: Int = 0
+    /// Common ligatures on the text font (Monaco: `fontLigatures`).
+    var fontLigatures: Bool = false
+    /// Vertical guides spanning bracket pairs (Monaco:
+    /// `guides.bracketPairs`).
+    var bracketGuides: Bool = false
+    /// Fires on every selection change (Monaco:
+    /// `onDidChangeCursorPosition`).
+    var onSelectionChange: ((EditorSelectionSnapshot) -> Void)?
+    /// Formats the SELECTED text (Monaco: formatSelection); ⌥⇧F with a
+    /// selection routes here before the whole-document handler.
+    var formatSelectionHandler: ((String) throws -> String?)?
+    /// Host-registered actions (Monaco: `addAction`): context-menu
+    /// entries with optional key equivalents.
+    var actions: [EditorAction] = []
     /// Insertion-point shape (Monaco: `cursorStyle`). `.line` is the
     /// system caret.
     var cursorStyle: EditorCursorStyle = .line
@@ -362,6 +440,15 @@ public struct Editor: View {
         onReadOnlyAttempt: ((String) -> Void)? = nil,
         linksEnabled: Bool = false,
         dragAndDropEnabled: Bool = true,
+        renderFinalNewline: EditorFinalNewlineMode = .off,
+        overviewRulerBorder: Bool = true,
+        hideCursorInOverviewRuler: Bool = false,
+        cursorSurroundingLines: Int = 0,
+        fontLigatures: Bool = false,
+        bracketGuides: Bool = false,
+        onSelectionChange: ((EditorSelectionSnapshot) -> Void)? = nil,
+        formatSelectionHandler: ((String) throws -> String?)? = nil,
+        actions: [EditorAction] = [],
         cursorStyle: EditorCursorStyle = .line,
         cursorWidth: CGFloat = 0,
         cursorBlinking: EditorCursorBlinking = .blink,
@@ -416,6 +503,15 @@ public struct Editor: View {
         self.onReadOnlyAttempt = onReadOnlyAttempt
         self.linksEnabled = linksEnabled
         self.dragAndDropEnabled = dragAndDropEnabled
+        self.renderFinalNewline = renderFinalNewline
+        self.overviewRulerBorder = overviewRulerBorder
+        self.hideCursorInOverviewRuler = hideCursorInOverviewRuler
+        self.cursorSurroundingLines = cursorSurroundingLines
+        self.fontLigatures = fontLigatures
+        self.bracketGuides = bracketGuides
+        self.onSelectionChange = onSelectionChange
+        self.formatSelectionHandler = formatSelectionHandler
+        self.actions = actions
         self.cursorStyle = cursorStyle
         self.cursorWidth = cursorWidth
         self.cursorBlinking = cursorBlinking
@@ -474,6 +570,15 @@ public struct Editor: View {
             },
             linksEnabled: linksEnabled,
             dragAndDropEnabled: dragAndDropEnabled,
+            renderFinalNewline: renderFinalNewline,
+            overviewRulerBorder: overviewRulerBorder,
+            hideCursorInOverviewRuler: hideCursorInOverviewRuler,
+            cursorSurroundingLines: cursorSurroundingLines,
+            fontLigatures: fontLigatures,
+            bracketGuides: bracketGuides,
+            onSelectionChange: onSelectionChange,
+            formatSelectionHandler: formatSelectionHandler,
+            actions: actions,
             cursorStyle: cursorStyle,
             cursorWidth: cursorWidth,
             cursorBlinking: cursorBlinking,
@@ -699,6 +804,15 @@ struct EditorRepresentable: NSViewRepresentable {
     var onReadOnlyAttemptNotice: ((String) -> Void)?
     var linksEnabled: Bool = false
     var dragAndDropEnabled: Bool = true
+    var renderFinalNewline: EditorFinalNewlineMode = .off
+    var overviewRulerBorder: Bool = true
+    var hideCursorInOverviewRuler: Bool = false
+    var cursorSurroundingLines: Int = 0
+    var fontLigatures: Bool = false
+    var bracketGuides: Bool = false
+    var onSelectionChange: ((EditorSelectionSnapshot) -> Void)?
+    var formatSelectionHandler: ((String) throws -> String?)?
+    var actions: [EditorAction] = []
     var cursorStyle: EditorCursorStyle = .line
     var cursorWidth: CGFloat = 0
     var cursorBlinking: EditorCursorBlinking = .blink
@@ -779,7 +893,7 @@ struct EditorRepresentable: NSViewRepresentable {
         textView.textContainerInset = NSSize(
             width: Editor.textInset.width,
             height: Editor.textInset.height + editorPadding.top)
-        textView.typingAttributes = [.font: font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS]
+        textView.typingAttributes = [.font: coordinator.textFont, .foregroundColor: EditorTheme.textPrimaryNS]
         textView.delegate = coordinator
         textView.editorCoordinator = coordinator
         textView.textStorage?.delegate = coordinator
@@ -818,6 +932,8 @@ struct EditorRepresentable: NSViewRepresentable {
             ruler.textView = textView
             ruler.coordinator = coordinator
             ruler.observeScroll(of: scrollView)
+            ruler.showsBorder = overviewRulerBorder
+            ruler.hidesCursor = hideCursorInOverviewRuler
         }
         guard let gutter = root.gutterView else { return root }
         gutter.textView = textView
@@ -941,6 +1057,17 @@ struct EditorRepresentable: NSViewRepresentable {
         coordinator.refreshCursorExclusion()
         coordinator.syncLinks(in: textView)
         coordinator.applyScrollBeyond(textView)
+
+        // Overview-ruler switches follow the host (idempotent).
+        if let ruler = root.rulerView {
+            if ruler.showsBorder != overviewRulerBorder
+                || ruler.hidesCursor != hideCursorInOverviewRuler
+            {
+                ruler.showsBorder = overviewRulerBorder
+                ruler.hidesCursor = hideCursorInOverviewRuler
+                ruler.needsDisplay = true
+            }
+        }
 
         // Find/action/goto pipeline (missing from the original: buttons
         // and go-to-line actions set state but never executed). Actions are
@@ -1231,10 +1358,9 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         let isFormatKey =
             modifiers == [.option, .shift]
             && (event.keyCode == 0x03 || event.charactersIgnoringModifiers?.lowercased() == "f")
-        if isFormatKey, window?.firstResponder === self, let editorCoordinator,
-            editorCoordinator.applyFormat(self)
-        {
-            return
+        if isFormatKey, window?.firstResponder === self, let editorCoordinator {
+            if editorCoordinator.applyFormatSelection(self) { return }
+            if editorCoordinator.applyFormat(self) { return }
         }
         // Esc: the completion popup wins; otherwise a visible find bar closes.
         if event.keyCode == 53, window?.firstResponder === self, let editorCoordinator,
@@ -1392,6 +1518,16 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.pasteAndFormat(in: self)
             return true
         }
+        // Host-registered actions (Monaco: addAction): exact modifier
+        // match on the key equivalent.
+        for action in coordinator.parent.actions {
+            guard let key = action.key,
+                action.modifiers == modifiers,
+                event.charactersIgnoringModifiers?.lowercased() == key.lowercased()
+            else { continue }
+            action.run()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -1495,11 +1631,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
         drawLineBand()
         drawIndentGuides(dirtyRect: dirtyRect)
+        drawBracketGuides(dirtyRect: dirtyRect)
         drawWhitespace(dirtyRect: dirtyRect)
         super.draw(dirtyRect)
         drawRulers(dirtyRect: dirtyRect)
         drawControlCharacters(dirtyRect: dirtyRect)
         drawColorDecorators(dirtyRect: dirtyRect)
+        drawFinalNewline()
         drawCustomCaret()
     }
 
@@ -1736,6 +1874,136 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             green: min(max(match[1] + bias, 0), 1),
             blue: min(max(match[2] + bias, 0), 1),
             alpha: min(alpha, 1))
+    }
+
+    /// One bracket pair for the guides pass: opener/closer offsets and
+    /// the opener's nesting depth (guides take the pair's depth color).
+    private struct BracketPair {
+        let open: Int
+        let close: Int
+        let depth: Int
+    }
+
+    /// Vertical guides spanning bracket pairs (Monaco:
+    /// `guides.bracketPairs`): for every pair whose opener and closer are
+    /// in the laid-out range, a faint hairline at the opener's column on
+    /// each line strictly between the pair's lines, tinted with the
+    /// pair's depth color. Background layer, beside the indent guides.
+    private func drawBracketGuides(dirtyRect: NSRect) {
+        guard let coordinator = editorCoordinator, coordinator.parent.bracketGuides,
+            let layoutManager, let container = textContainer, !string.isEmpty
+        else { return }
+        let ns = string as NSString
+        let length = ns.length
+        guard length <= 20_000 else { return }  // hosts are short; the
+        // whole-document pair walk is user-scale at this size.
+        var stack: [(unit: unichar, index: Int)] = []
+        var pairs: [BracketPair] = []
+        let openers: [unichar] = [
+            UInt16(UnicodeScalar("(").value), UInt16(UnicodeScalar("[").value),
+            UInt16(UnicodeScalar("{").value),
+        ]
+        let closers: [unichar] = [
+            UInt16(UnicodeScalar(")").value), UInt16(UnicodeScalar("]").value),
+            UInt16(UnicodeScalar("}").value),
+        ]
+        for index in 0..<length {
+            let unit = ns.character(at: index)
+            if openers.contains(unit) {
+                stack.append((unit, index))
+            } else if let slot = closers.firstIndex(of: unit),
+                let top = stack.last,
+                top.unit == openers[slot]
+            {
+                stack.removeLast()
+                if pairs.count < 500 {
+                    pairs.append(
+                        BracketPair(open: top.index, close: index, depth: stack.count + 1))
+                }
+            }
+        }
+        guard !pairs.isEmpty else { return }
+        let palette: [NSColor] = [
+            .systemBlue, .systemPurple, .systemTeal,
+            .systemOrange, .systemGreen, .systemPink,
+        ]
+        let bounding = dirtyRect.offsetBy(
+            dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
+        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        guard charRange.length > 0 else { return }
+        for pair in pairs where pair.depth > 0 {
+            // The opener's column: same x on every monospace line.
+            let openGlyph = layoutManager.glyphIndexForCharacter(at: pair.open)
+            var openFragmentGlyphs = NSRange()
+            let openFragment = layoutManager.lineFragmentRect(
+                forGlyphAt: openGlyph, effectiveRange: &openFragmentGlyphs)
+            let openChars = layoutManager.characterRange(
+                forGlyphRange: openFragmentGlyphs, actualGlyphRange: nil)
+            guard openChars.length > 0 else { continue }
+            let columnX =
+                openFragment.minX + textContainerOrigin.x
+                + CGFloat(pair.open - openChars.location) / CGFloat(openChars.length)
+                * openFragment.width
+            let color = palette[(pair.depth - 1) % palette.count].withAlphaComponent(0.3)
+            color.setFill()
+            // Every laid-out fragment strictly between the pair's lines.
+            var index = charRange.location
+            let end = NSMaxRange(charRange)
+            while index < end {
+                var fragmentGlyphs = NSRange()
+                let fragment = layoutManager.lineFragmentRect(
+                    forGlyphAt: index, effectiveRange: &fragmentGlyphs)
+                let fragmentChars = layoutManager.characterRange(
+                    forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+                guard fragmentChars.location < length else { break }
+                let openLine = ns.lineRange(for: NSRange(location: pair.open, length: 0))
+                let closeLine = ns.lineRange(for: NSRange(location: pair.close, length: 0))
+                let fragmentLine = ns.lineRange(
+                    for: NSRange(location: fragmentChars.location, length: 0))
+                if fragmentLine.location > NSMaxRange(openLine),
+                    NSMaxRange(fragmentLine) < closeLine.location + closeLine.length
+                {
+                    NSRect(
+                        x: columnX, y: fragment.minY + textContainerOrigin.y,
+                        width: 1, height: fragment.height
+                    ).fill()
+                }
+                index = NSMaxRange(fragmentGlyphs)
+            }
+        }
+    }
+
+    /// Faint pilcrow at the final newline (Monaco: `renderFinalNewline`).
+    private func drawFinalNewline() {
+        guard let coordinator = editorCoordinator,
+            coordinator.parent.renderFinalNewline != .off,
+            let layoutManager, let container = textContainer
+        else { return }
+        let length = (string as NSString).length
+        guard length > 0,
+            (string as NSString).character(at: length - 1) == UInt16(UnicodeScalar("\n").value)
+        else { return }
+        if coordinator.parent.renderFinalNewline == .boundary {
+            let caretLine = coordinator.highlighter.lineNumber(ofUTF16Offset: selectedRange().location)
+            let lastLine = coordinator.highlighter.lineNumber(ofUTF16Offset: length)
+            guard caretLine == lastLine else { return }
+        }
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: length - 1)
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1), in: container)
+        let pilcrow = NSAttributedString(
+            string: "¶",
+            attributes: [
+                .font: coordinator.textFont,
+                .foregroundColor: NSColor(EditorTheme.textSecondary).withAlphaComponent(0.4),
+            ])
+        let size = pilcrow.size()
+        pilcrow.draw(
+            at: NSPoint(
+                x: textContainerOrigin.x + glyphRect.maxX,
+                y: textContainerOrigin.y + fragment.minY + (fragment.height - size.height) / 2))
     }
 
     /// Custom insertion point (Monaco: `cursorStyle` + `cursorWidth`).
@@ -2098,7 +2366,27 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         item("Paste and Format", "v", [.command, .option, .shift], #selector(menuPasteAndFormat), editable && coordinator.canFormat(self))
         item("Go to Line…", "l", [.command, .option], #selector(menuGoToLine), true)
         item("Use Selection for Find", "e", [.command, .option], #selector(menuUseSelectionForFind), selectedRange().length > 0)
+        if !coordinator.parent.actions.isEmpty {
+            menu.addItem(.separator())
+            for action in coordinator.parent.actions {
+                let hostItem = NSMenuItem(
+                    title: action.title, action: #selector(menuRunHostAction(_:)),
+                    keyEquivalent: action.key ?? "")
+                hostItem.keyEquivalentModifierMask = action.modifiers
+                hostItem.representedObject = action.id
+                hostItem.target = self
+                menu.addItem(hostItem)
+            }
+        }
         return menu
+    }
+
+    @objc private func menuRunHostAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+            let coordinator = editorCoordinator,
+            let action = coordinator.parent.actions.first(where: { $0.id == id })
+        else { return }
+        action.run()
     }
 
     @objc private func menuFormat() { _ = editorCoordinator?.applyFormat(self) }
@@ -2203,6 +2491,30 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// Re-seeded lazily whenever the live selection drifts off the head.
     var smartSelectChain: [NSRange] = []
     var smartSelectPosition: Int = 0
+    /// The ligature-enabled variant of the host font (Monaco:
+    /// `fontLigatures`); base monospaced fonts render without ligatures,
+    /// so the flag only ever enables. Cached per host font.
+    var textFont: NSFont {
+        let base = parent.font.nsFont
+        guard parent.fontLigatures else { return base }
+        if ligatureFontSource == base, let cached = ligatureFontCache {
+            return cached
+        }
+        let descriptor = base.fontDescriptor.addingAttributes([
+            .featureSettings: [
+                [
+                    NSFontDescriptor.FeatureKey.typeIdentifier: kLigaturesType,
+                    NSFontDescriptor.FeatureKey.selectorIdentifier: kCommonLigaturesOnSelector,
+                ]
+            ]
+        ])
+        let font = NSFont(descriptor: descriptor, size: base.pointSize) ?? base
+        ligatureFontSource = base
+        ligatureFontCache = font
+        return font
+    }
+    private var ligatureFontSource: NSFont?
+    private var ligatureFontCache: NSFont?
     /// Editor-local find state: all matches of the active query, the
     /// selected one, and the last mirrored find state (for diffing).
     var findMatches: [NSRange] = []
@@ -2469,6 +2781,15 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         // Caret-line strip in the gutter (renderLineHighlight
         // .gutter/.all) repaints with the caret.
         invalidateGutter()
+        if let callback = parent.onSelectionChange {
+            let selection = textView.selectedRange()
+            let length = (textView.string as NSString).length
+            let offset = length > 0 ? min(selection.location, length - 1) : 0
+            let (line, column) = highlighter.lineAndColumn(ofUTF16Offset: offset)
+            callback(
+                EditorSelectionSnapshot(
+                    line: line, column: column, length: selection.length))
+        }
     }
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -2615,7 +2936,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         guard let storage = textView.textStorage else { return }
         let full = NSRange(location: 0, length: storage.length)
         storage.setAttributes(
-            [.font: parent.font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS],
+            [.font: textFont, .foregroundColor: EditorTheme.textPrimaryNS],
             range: full)
         if let runs = SyntaxHighlight.foregroundRuns(in: storage.string, profile: parent.syntax) {
             for (range, color) in runs {
@@ -2641,7 +2962,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
             NSAttributedString(
                 string: text,
                 attributes: [
-                    .font: parent.font.nsFont,
+                    .font: textFont,
                     .foregroundColor: EditorTheme.textPrimaryNS,
                 ]))
         // Clamp against the storage's LIVE post-edit length, not the
@@ -2842,6 +3163,37 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 textView.insertionPointColor = originalColor
             }
+            return true
+        } catch let error as TextFormatError {
+            parent.onFormatError?(error.message)
+            return true
+        } catch {
+            parent.onFormatError?("Unexpected token")
+            return true
+        }
+    }
+
+    /// Formats the SELECTED text only (Monaco: formatSelection) through
+    /// the host's `formatSelectionHandler`; returns false when there is
+    /// no handler or no selection (the key falls back to the
+    /// whole-document handler).
+    func applyFormatSelection(_ textView: NSTextView) -> Bool {
+        guard textView.isEditable, let handler = parent.formatSelectionHandler else {
+            return false
+        }
+        let selection = textView.selectedRange()
+        guard selection.length > 0 else { return false }
+        do {
+            let selected = (textView.string as NSString).substring(with: selection)
+            guard let formatted = try handler(selected) else { return true }
+            guard textView.shouldChangeText(in: selection, replacementString: formatted) else {
+                return true
+            }
+            textView.textStorage?.replaceCharacters(in: selection, with: formatted)
+            textView.didChangeText()
+            textView.setSelectedRange(
+                NSRange(location: selection.location, length: (formatted as NSString).length))
+            textView.undoManager?.setActionName(parent.formatActionName + " Selection")
             return true
         } catch let error as TextFormatError {
             parent.onFormatError?(error.message)

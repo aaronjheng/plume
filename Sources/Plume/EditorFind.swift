@@ -416,7 +416,7 @@ extension EditorCoordinator {
                 ?? (findMatches.isEmpty ? nil : 0)
             if let index = findCurrentIndex {
                 textView.setSelectedRange(findMatches[index])
-                textView.scrollRangeToVisible(findMatches[index])
+                reveal(findMatches[index], in: textView)
             }
         } else {
             // An edit in the editor: keep the index on the first match
@@ -593,7 +593,7 @@ extension EditorCoordinator {
         findCurrentIndex = next
         applyFindHighlights(in: textView)
         textView.setSelectedRange(findMatches[next])
-        textView.scrollRangeToVisible(findMatches[next])
+        reveal(findMatches[next], in: textView)
         parent.findHooks?.countChanged(findMatches.count, next)
     }
 
@@ -609,7 +609,7 @@ extension EditorCoordinator {
         findCurrentIndex = previous
         applyFindHighlights(in: textView)
         textView.setSelectedRange(findMatches[previous])
-        textView.scrollRangeToVisible(findMatches[previous])
+        reveal(findMatches[previous], in: textView)
         parent.findHooks?.countChanged(findMatches.count, previous)
     }
 
@@ -625,7 +625,7 @@ extension EditorCoordinator {
         // first match at/after the replacement, so Replace walks forward.
         if let index = findCurrentIndex, index < findMatches.count {
             textView.setSelectedRange(findMatches[index])
-            textView.scrollRangeToVisible(findMatches[index])
+            reveal(findMatches[index], in: textView)
             applyFindHighlights(in: textView)
         }
         parent.findHooks?.countChanged(findMatches.count, findCurrentIndex)
@@ -650,7 +650,7 @@ extension EditorCoordinator {
         textView.didChangeText()
         if let first = findMatches.first {
             textView.setSelectedRange(first)
-            textView.scrollRangeToVisible(first)
+            reveal(first, in: textView)
         }
         parent.findHooks?.countChanged(findMatches.count, findCurrentIndex)
     }

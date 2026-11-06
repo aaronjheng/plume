@@ -44,6 +44,12 @@ final class EditorOverviewRulerView: NSView {
         }
     }
 
+    /// Left hairline separating the ruler from the text (Monaco:
+    /// `overviewRulerBorder`).
+    var showsBorder = true
+    /// Hide the caret tick (Monaco: `hideCursorInOverviewRuler`).
+    var hidesCursor = false
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -52,8 +58,10 @@ final class EditorOverviewRulerView: NSView {
         EditorTheme.codeBackgroundNS.setFill()
         safe.fill()
         // Left hairline separating the ruler from the text.
-        NSColor(EditorTheme.border).setFill()
-        NSRect(x: bounds.minX, y: bounds.minY, width: 1, height: bounds.height).fill()
+        if showsBorder {
+            NSColor(EditorTheme.border).setFill()
+            NSRect(x: bounds.minX, y: bounds.minY, width: 1, height: bounds.height).fill()
+        }
 
         guard let textView, let coordinator, bounds.height > 1 else { return }
         let length = max((textView.string as NSString).length, 1)
@@ -95,9 +103,11 @@ final class EditorOverviewRulerView: NSView {
         }
 
         // Caret line: accent tick.
-        let caret = min(textView.selectedRange().location, length)
-        NSColor(EditorTheme.accent).setFill()
-        NSRect(x: track.minX, y: yFraction(caret) - 0.5, width: track.width, height: 1).fill()
+        if !hidesCursor {
+            let caret = min(textView.selectedRange().location, length)
+            NSColor(EditorTheme.accent).setFill()
+            NSRect(x: track.minX, y: yFraction(caret) - 0.5, width: track.width, height: 1).fill()
+        }
     }
 
     // MARK: - Proportional scrolling

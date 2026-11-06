@@ -48,6 +48,16 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   (pairs painted by nesting depth; strings/comments keep their paint),
   and Smart Select (⌃⇧⌘→/←) walking the tree-sitter node ancestry with
   word/line fallbacks.
+- **More rendering options** (Monaco options): `renderFinalNewline`
+  (on/off/boundary pilcrow), `overviewRulerBorder` +
+  `hideCursorInOverviewRuler`, `cursorSurroundingLines` (jump targets
+  keep context lines visible), `fontLigatures`, and
+  `guides.bracketPairs` (vertical guides spanning pairs, tinted by
+  depth).
+- **Host API**: `onSelectionChange` (line/column/length per caret
+  move), `formatSelectionHandler` (⌥⇧F with a selection formats the
+  selection only), and `actions` (Monaco `addAction`: context-menu
+  entries with optional key equivalents).
 - **Find/replace options** (Monaco options): `seedSearchStringFromSelection`,
   `findLoops`, `findCursorMoveOnType`, `autoFindInSelection` (+ ⌥⌘G to
   toggle find-in-selection live).
