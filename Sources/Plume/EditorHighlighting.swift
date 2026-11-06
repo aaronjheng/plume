@@ -198,6 +198,60 @@ final class SourceHighlighter {
         return Self.lineIndex(of: clamped, in: lineStarts) + 1
     }
 
+    /// SwiftTreeSitter's `parse(_:string:)` feeds the string as UTF-16LE
+    /// (see `Parser.readFunction`), so the retained tree's "byte" offsets
+    /// are 2 × UTF-16 offsets - the same convention `edit` uses for its
+    /// `InputEdit` (`startByte: 2 * start`). These helpers keep the
+    /// UTF-16-facing callers in step.
+    private static func byteOffset(ofUTF16Offset offset: Int) -> Int { 2 * offset }
+
+    private static func utf16Range(ofByteRange byteRange: Range<UInt32>) -> NSRange {
+        NSRange(
+            location: Int(byteRange.lowerBound) / 2,
+            length: (Int(byteRange.upperBound) - Int(byteRange.lowerBound)) / 2)
+    }
+
+    /// Ancestor chain of the smallest syntax node containing `range`:
+    /// each distinct node range from innermost to the root, as UTF-16
+    /// ranges. Nil without a retained tree (plain profile). The O(n)
+    /// ladder walks are fine here: expansion is user-paced.
+    func enclosingNodeRanges(of range: NSRange, in text: String) -> [NSRange]? {
+        guard let tree, let root = tree.rootNode else { return nil }
+        let start = Self.byteOffset(ofUTF16Offset: min(max(range.location, 0), 1 << 28))
+        let end = Self.byteOffset(ofUTF16Offset: min(max(NSMaxRange(range), 0), 1 << 28))
+        guard var node = root.descendant(in: UInt32(start)..<UInt32(max(end, start)))
+        else { return nil }
+        var ranges: [NSRange] = []
+        var current: Node? = node
+        while let walk = current {
+            let utf16Range = Self.utf16Range(ofByteRange: walk.byteRange)
+            if ranges.last != utf16Range { ranges.append(utf16Range) }
+            current = walk.parent
+        }
+        return ranges
+    }
+
+    /// UTF-16 ranges of string/comment nodes in the retained tree (the
+    /// bracket colorizer leaves those to the host's own paint). Nil
+    /// without a tree.
+    func stringAndCommentRanges(in text: String) -> [NSRange]? {
+        guard let tree, let root = tree.rootNode else { return nil }
+        var out: [NSRange] = []
+        func walk(_ node: Node) {
+            if let type = node.nodeType,
+                type.contains("string") || type.contains("comment")
+            {
+                out.append(Self.utf16Range(ofByteRange: node.byteRange))
+                return
+            }
+            for index in 0..<node.childCount {
+                if let child = node.child(at: index) { walk(child) }
+            }
+        }
+        walk(root)
+        return out
+    }
+
     /// Whether a UTF-16 offset opens a line (offset 0, or just after `\n`).
     /// The gutter numbers only fragments that start a line, so wrapped
     /// continuations repeat nothing.

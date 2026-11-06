@@ -374,11 +374,26 @@ extension EditorCoordinator {
         wordHighlightRanges = []
         guard !parent.find.visible else { return }
         let selection = textView.selectedRange()
-        guard selection.length > 0, selection.length <= 64,
-            let word = (textView.string as NSString).substring(with: selection) as String?,
-            !word.isEmpty,
-            word.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
-        else { return }
+        // The wash target: the selected word, or - when the selection is
+        // empty and `occurrencesHighlight` is on - the word under the
+        // caret (Monaco: occurrences on the caret word, selection
+        // highlight always on).
+        var word: String?
+        if selection.length > 0, selection.length <= 64 {
+            let candidate = (textView.string as NSString).substring(with: selection)
+            if !candidate.isEmpty,
+                candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
+            {
+                word = candidate
+            }
+        } else if selection.length == 0, parent.occurrencesHighlight {
+            if let range = caretWordRange(in: textView, caret: min(selection.location, length)),
+                range.length <= 64
+            {
+                word = (textView.string as NSString).substring(with: range)
+            }
+        }
+        guard let word, !word.isEmpty else { return }
 
         let ns = textView.string as NSString
         var ranges: [NSRange] = []
@@ -405,6 +420,31 @@ extension EditorCoordinator {
             layoutManager.addTemporaryAttribute(.backgroundColor, value: wash, forCharacterRange: range)
         }
     }
+
+    /// The word the caret sits in or immediately follows (Monaco
+    /// highlights the caret's word at either edge). Nil off any word.
+    fileprivate func caretWordRange(in textView: NSTextView, caret: Int) -> NSRange? {
+        let ns = textView.string as NSString
+        let length = ns.length
+        func isWord(_ index: Int) -> Bool {
+            index >= 0 && index < length && isWordChar(codeEditorChar(ns, index))
+        }
+        guard caret >= 0, caret <= length else { return nil }
+        var start = caret
+        var end = caret
+        if isWord(caret) {
+            end = caret
+            while end < length, isWord(end) { end += 1 }
+            while start > 0, isWord(start - 1) { start -= 1 }
+        } else if isWord(caret - 1) {
+            end = caret
+            while start > 0, isWord(start - 1) { start -= 1 }
+        } else {
+            return nil
+        }
+        guard end > start else { return nil }
+        return NSRange(location: start, length: end - start)
+    }
 }
 
 extension EditorCoordinator {
@@ -413,6 +453,151 @@ extension EditorCoordinator {
     func requestLinePanel(in textView: NSTextView) {
         parent.findHooks?.linePanel()
         _ = textView
+    }
+}
+
+// MARK: Smart select (Monaco: ⌃⇧⌘→ / ⌃⇧⌘←)
+
+extension EditorCoordinator {
+    /// Expands the selection one syntactic level out (word → node chain →
+    /// line → whole document). Re-seeds automatically after any manual
+    /// selection change, so no explicit invalidation is needed.
+    func expandSmartSelection(in textView: NSTextView) {
+        let current = textView.selectedRange()
+        if smartSelectChain.isEmpty
+            || smartSelectChain[smartSelectPosition] != current
+        {
+            smartSelectChain = makeSmartSelectChain(from: current, in: textView)
+            smartSelectPosition = 0
+        }
+        guard smartSelectPosition + 1 < smartSelectChain.count else { return }
+        smartSelectPosition += 1
+        applySmartSelection(smartSelectChain[smartSelectPosition], in: textView)
+    }
+
+    /// Contracts back down the expansion chain (only while the live
+    /// selection still matches the chain's head).
+    func shrinkSmartSelection(in textView: NSTextView) {
+        guard smartSelectPosition > 0,
+            smartSelectChain[smartSelectPosition] == textView.selectedRange()
+        else { return }
+        smartSelectPosition -= 1
+        applySmartSelection(smartSelectChain[smartSelectPosition], in: textView)
+    }
+
+    private func applySmartSelection(_ range: NSRange, in textView: NSTextView) {
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+    }
+
+    /// The expansion chain: the seed selection, then every strictly
+    /// containing level (syntax-node ancestry when a tree is retained,
+    /// word/line fallbacks otherwise), ending with the whole document.
+    private func makeSmartSelectChain(from selection: NSRange, in textView: NSTextView) -> [NSRange] {
+        let ns = textView.string as NSString
+        let length = ns.length
+        var chain: [NSRange] = [selection]
+        func push(_ range: NSRange) {
+            guard let last = chain.last,
+                NSIntersectionRange(range, last).length == last.length,
+                range.length > last.length
+            else { return }
+            chain.append(range)
+        }
+        if selection.length == 0 {
+            let caret = min(selection.location, length)
+            if let word = caretWordRange(in: textView, caret: caret) {
+                push(word)
+            }
+        }
+        if let ancestry = highlighter.enclosingNodeRanges(
+            of: chain.last ?? selection, in: textView.string)
+        {
+            for range in ancestry.prefix(24) {
+                push(range)
+            }
+        }
+        if length > 0 {
+            let anchor = min(max(chain.last?.location ?? 0, 0), length - 1)
+            var lineRange = ns.lineRange(for: NSRange(location: anchor, length: 0))
+            // Content only: the trailing newline is not part of the line.
+            if lineRange.length > 0,
+                ns.character(at: NSMaxRange(lineRange) - 1)
+                    == UInt16(UnicodeScalar("\n").value)
+            {
+                lineRange.length -= 1
+            }
+            push(lineRange)
+        }
+        push(NSRange(location: 0, length: length))
+        return chain
+    }
+}
+
+// MARK: Bracket pair colorization (Monaco: bracketPairColorization)
+
+extension EditorCoordinator {
+    /// Paints ()/[]{} by nesting depth as temporary foreground colors.
+    /// Strings and comments keep the host's own paint; unmatched closers
+    /// stay unpainted. Runs with the diagnostics cadence (after every
+    /// edit), tracked ranges removed first like the squiggles.
+    func applyBracketColors(in textView: NSTextView) {
+        let length = (textView.string as NSString).length
+        for range in bracketColorRanges where NSMaxRange(range) <= length && range.length > 0 {
+            textView.layoutManager?.removeTemporaryAttribute(
+                .foregroundColor, forCharacterRange: range)
+        }
+        bracketColorRanges = []
+        guard parent.bracketPairColorization, length > 0,
+            let layoutManager = textView.layoutManager
+        else { return }
+        let ns = textView.string as NSString
+        let hidden = highlighter.stringAndCommentRanges(in: textView.string) ?? []
+        let imeMarked = textView.markedRange()
+        func hiddenAt(_ index: Int) -> Bool {
+            hidden.contains { NSLocationInRange(index, $0) }
+        }
+        func inMarked(_ index: Int) -> Bool {
+            imeMarked.location != NSNotFound && NSLocationInRange(index, imeMarked)
+        }
+        let palette: [NSColor] = [
+            .systemBlue, .systemPurple, .systemTeal,
+            .systemOrange, .systemGreen, .systemPink,
+        ]
+        var depth = 0
+        var colored: [(NSRange, NSColor)] = []
+        var index = 0
+        while index < length {
+            let unit = ns.character(at: index)
+            let isOpen =
+                unit == UInt16(UnicodeScalar("(").value)
+                || unit == UInt16(UnicodeScalar("[").value)
+                || unit == UInt16(UnicodeScalar("{").value)
+            let isClose =
+                unit == UInt16(UnicodeScalar(")").value)
+                || unit == UInt16(UnicodeScalar("]").value)
+                || unit == UInt16(UnicodeScalar("}").value)
+            guard isOpen || isClose, !hiddenAt(index), !inMarked(index) else {
+                index += 1
+                continue
+            }
+            if isOpen {
+                depth += 1
+            }
+            if depth > 0 {
+                let color = palette[(depth - 1) % palette.count].withAlphaComponent(0.9)
+                colored.append((NSRange(location: index, length: 1), color))
+            }
+            if isClose, depth > 0 {
+                depth -= 1
+            }
+            index += 1
+        }
+        for (range, color) in colored.prefix(2000) {
+            layoutManager.addTemporaryAttribute(
+                .foregroundColor, value: color, forCharacterRange: range)
+            bracketColorRanges.append(range)
+        }
     }
 }
 
@@ -501,6 +686,9 @@ extension EditorCoordinator {
         // Clickable links re-scan with the same cadence as the squiggles
         // (Monaco: links): after every edit, over the fresh layout.
         applyLinks(in: textView)
+        // Bracket pairs re-color with the same cadence (Monaco:
+        // bracketPairColorization).
+        applyBracketColors(in: textView)
     }
 }
 

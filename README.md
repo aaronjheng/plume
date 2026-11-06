@@ -42,6 +42,12 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   `links` (URL runs open on click), `dragAndDropEnabled`, and
   `readOnlyMessage` (a capsule surfaces it when a read-only edit is
   attempted; `onReadOnlyAttempt` forwards it).
+- **Editing feel** (Monaco options): `occurrencesHighlight` (word under
+  the caret washes all its occurrences), `colorDecorators` (inline
+  swatches for `#hex`/`rgb()`/`hsl()`), `bracketPairColorization`
+  (pairs painted by nesting depth; strings/comments keep their paint),
+  and Smart Select (⌃⇧⌘→/←) walking the tree-sitter node ancestry with
+  word/line fallbacks.
 - **Find/replace options** (Monaco options): `seedSearchStringFromSelection`,
   `findLoops`, `findCursorMoveOnType`, `autoFindInSelection` (+ ⌥⌘G to
   toggle find-in-selection live).

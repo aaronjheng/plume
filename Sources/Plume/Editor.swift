@@ -234,6 +234,15 @@ public struct Editor: View {
     /// Underline ambiguous unicode (bidi/zero-width controls)
     /// (Monaco: `unicodeHighlight`).
     var unicodeHighlight: Bool = false
+    /// Word-under-caret occurrence wash (Monaco:
+    /// `occurrencesHighlight`). Off keeps the historic selection-only
+    /// highlight.
+    var occurrencesHighlight: Bool = false
+    /// Inline color swatches (Monaco: `colorDecorators`).
+    var colorDecorators: Bool = false
+    /// Bracket pairs painted by nesting depth (Monaco:
+    /// `bracketPairColorization`).
+    var bracketPairColorization: Bool = false
     /// Diagnostic squiggle display (Monaco:
     /// `renderValidationDecorations`).
     var renderValidationDecorations: EditorValidationMode = .on
@@ -345,6 +354,9 @@ public struct Editor: View {
         editorPadding: EditorPadding = EditorPadding(),
         renderControlCharacters: Bool = false,
         unicodeHighlight: Bool = false,
+        occurrencesHighlight: Bool = false,
+        colorDecorators: Bool = false,
+        bracketPairColorization: Bool = false,
         renderValidationDecorations: EditorValidationMode = .on,
         readOnlyMessage: String? = nil,
         onReadOnlyAttempt: ((String) -> Void)? = nil,
@@ -396,6 +408,9 @@ public struct Editor: View {
         self.editorPadding = editorPadding
         self.renderControlCharacters = renderControlCharacters
         self.unicodeHighlight = unicodeHighlight
+        self.occurrencesHighlight = occurrencesHighlight
+        self.colorDecorators = colorDecorators
+        self.bracketPairColorization = bracketPairColorization
         self.renderValidationDecorations = renderValidationDecorations
         self.readOnlyMessage = readOnlyMessage
         self.onReadOnlyAttempt = onReadOnlyAttempt
@@ -448,6 +463,9 @@ public struct Editor: View {
             editorPadding: editorPadding,
             renderControlCharacters: renderControlCharacters,
             unicodeHighlight: unicodeHighlight,
+            occurrencesHighlight: occurrencesHighlight,
+            colorDecorators: colorDecorators,
+            bracketPairColorization: bracketPairColorization,
             renderValidationDecorations: renderValidationDecorations,
             readOnlyMessage: readOnlyMessage,
             onReadOnlyAttempt: onReadOnlyAttempt,
@@ -662,6 +680,16 @@ struct EditorRepresentable: NSViewRepresentable {
     var editorPadding: EditorPadding = EditorPadding()
     var renderControlCharacters: Bool = false
     var unicodeHighlight: Bool = false
+    /// Word under the caret (empty selection) highlights all its
+    /// occurrences (Monaco: `occurrencesHighlight`). Selected-text
+    /// highlighting is the historic behavior and stays always on.
+    var occurrencesHighlight: Bool = false
+    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens
+    /// (Monaco: `colorDecorators`).
+    var colorDecorators: Bool = false
+    /// Bracket pairs painted by nesting depth (Monaco:
+    /// `bracketPairColorization`); strings/comments keep their own paint.
+    var bracketPairColorization: Bool = false
     var renderValidationDecorations: EditorValidationMode = .on
     var readOnlyMessage: String?
     var onReadOnlyAttempt: ((String) -> Void)?
@@ -1294,6 +1322,17 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             if coordinator.toggleComment(self) { return true }
             return super.performKeyEquivalent(with: event)
         }
+        // Smart select (Monaco: ⌃⇧⌘→ / ⌃⇧⌘←). Selection-only, so it
+        // works on read-only editors too - hence ahead of the editable
+        // guard below.
+        if modifiers == [.control, .shift, .command], event.keyCode == 124 {
+            coordinator.expandSmartSelection(in: self)
+            return true
+        }
+        if modifiers == [.control, .shift, .command], event.keyCode == 123 {
+            coordinator.shrinkSmartSelection(in: self)
+            return true
+        }
         guard isEditable || Self.isNavigationEquivalent(event: event, modifiers: modifiers) else {
             return super.performKeyEquivalent(with: event)
         }
@@ -1374,6 +1413,10 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         registerTooltipRect()
+        // The fill's diagnostics pass deferred until a window existed.
+        if window != nil {
+            editorCoordinator?.flushPendingDiagnostics(in: self)
+        }
     }
 
     override func layout() {
@@ -1456,6 +1499,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         super.draw(dirtyRect)
         drawRulers(dirtyRect: dirtyRect)
         drawControlCharacters(dirtyRect: dirtyRect)
+        drawColorDecorators(dirtyRect: dirtyRect)
         drawCustomCaret()
     }
 
@@ -1554,6 +1598,144 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             }
             index = NSMaxRange(fragmentGlyphs)
         }
+    }
+
+    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens
+    /// (Monaco: `colorDecorators`): a small filled box in the leading
+    /// margin of the token, with a hairline border so it reads on both
+    /// light and dark backgrounds.
+    private func drawColorDecorators(dirtyRect: NSRect) {
+        guard let coordinator = editorCoordinator, coordinator.parent.colorDecorators,
+            let layoutManager, let container = textContainer, !string.isEmpty
+        else { return }
+        let ns = string as NSString
+        let length = ns.length
+        let bounding = dirtyRect.offsetBy(
+            dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
+        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        guard charRange.length > 0, charRange.location < length else { return }
+        let visible = NSRange(
+            location: charRange.location,
+            length: min(charRange.length, length - charRange.location))
+        for (token, color) in Self.colorTokens(in: ns as String, range: visible).prefix(100) {
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: token.location)
+            var fragmentGlyphs = NSRange()
+            let fragment = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphIndex, effectiveRange: &fragmentGlyphs)
+            let fragmentChars = layoutManager.characterRange(
+                forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+            let lineLength = max(fragmentChars.length, 1)
+            let fraction = CGFloat(token.location - fragmentChars.location) / CGFloat(lineLength)
+            let swatch = NSRect(
+                x: max(
+                    fragment.minX + textContainerOrigin.x + fraction * fragment.width - 13,
+                    textContainerOrigin.x),
+                y: fragment.minY + textContainerOrigin.y + 3,
+                width: 10,
+                height: max(fragment.height - 6, 6))
+            color.setFill()
+            swatch.fill()
+            EditorTheme.codeBackgroundNS.setStroke()
+            NSBezierPath(rect: swatch.insetBy(dx: 0.5, dy: 0.5)).stroke()
+        }
+    }
+
+    /// Color tokens (CSS-style subset): `#rgb/#rgba/#rrggbb/#rrggbbaa`,
+    /// `rgb()/rgba()`, `hsl()/hsla()` with percentage/int forms.
+    private static let colorTokenRegexes: [NSRegularExpression] = {
+        let patterns = [
+            "#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})(?![0-9a-fA-F])",
+            "rgba?\\(\\s*(?:\\d{1,3}%|\\d{1,3})\\s*,\\s*(?:\\d{1,3}%|\\d{1,3})\\s*,\\s*(?:\\d{1,3}%|\\d{1,3})\\s*"
+                + "(?:,\\s*(?:0(?:\\.\\d+)?|1(?:\\.0+)?|(?:\\d{1,3})%)\\s*)?\\)",
+            "hsla?\\(\\s*\\d{1,3}\\s*,\\s*\\d{1,3}%\\s*,\\s*\\d{1,3}%\\s*(?:,\\s*(?:0(?:\\.\\d+)?|1(?:\\.0+)?)\\s*)?\\)",
+        ]
+        return patterns.map { pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                preconditionFailure("Invalid color token regex: \(pattern)")
+            }
+            return regex
+        }
+    }()
+
+    private static func colorTokens(in text: String, range: NSRange) -> [(NSRange, NSColor)] {
+        let ns = text as NSString
+        var out: [(NSRange, NSColor)] = []
+        for regex in colorTokenRegexes {
+            regex.enumerateMatches(in: text, range: range) { match, _, _ in
+                guard let match, let color = color(from: ns.substring(with: match.range))
+                else { return }
+                out.append((match.range, color))
+            }
+        }
+        return out
+    }
+
+    private static func color(from token: String) -> NSColor? {
+        if token.hasPrefix("#") {
+            let hex = String(token.dropFirst())
+            var values: [CGFloat] = []
+            let step = hex.count / 2 == 0 ? 1 : 2
+            var units = hex.map(String.init)
+            if step == 1 { units = units.flatMap { [$0, $0] } }
+            guard units.count == 6 || units.count == 8 else { return nil }
+            var index = 0
+            while index < units.count {
+                guard let value = UInt8(units[index] + units[index + 1], radix: 16) else {
+                    return nil
+                }
+                values.append(CGFloat(value) / 255)
+                index += 2
+            }
+            return NSColor(
+                calibratedRed: values[0], green: values[1], blue: values[2],
+                alpha: values.count > 3 ? values[3] : 1)
+        }
+        guard let open = token.firstIndex(of: "(") else { return nil }
+        let kind = token[..<open].lowercased()
+        let body = token[token.index(after: open)..<(token.lastIndex(of: ")") ?? token.endIndex)]
+        let parts = body.split(whereSeparator: { $0 == "," }).map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
+        func component(_ part: String) -> CGFloat? {
+            if part.hasSuffix("%") {
+                guard let value = Double(part.dropLast()) else { return nil }
+                return CGFloat(value / 100)
+            }
+            guard let value = Double(part) else { return nil }
+            return CGFloat(value)
+        }
+        guard parts.count >= 3, let first = component(parts[0]),
+            let second = component(parts[1]), let third = component(parts[2])
+        else { return nil }
+        let alpha: CGFloat = parts.count > 3 ? (component(parts[3]) ?? 1) : 1
+        if kind.hasPrefix("rgb") {
+            return NSColor(
+                calibratedRed: min(first, 255) / 255, green: min(second, 255) / 255,
+                blue: min(third, 255) / 255, alpha: min(alpha, 1))
+        }
+        guard kind.hasPrefix("hsl") else { return nil }
+        let hue = (first.truncatingRemainder(dividingBy: 360)) / 360
+        let sat = min(max(second, 0), 1)
+        let light = min(max(third, 0), 1)
+        let chroma = (1 - abs(2 * light - 1)) * sat
+        let huePrime = hue * 6
+        let secondary = chroma * (1 - abs(huePrime.truncatingRemainder(dividingBy: 2) - 1))
+        let match: [CGFloat]
+        switch huePrime {
+        case ..<1: match = [chroma, secondary, 0]
+        case ..<2: match = [secondary, chroma, 0]
+        case ..<3: match = [0, chroma, secondary]
+        case ..<4: match = [0, secondary, chroma]
+        case ..<5: match = [secondary, 0, chroma]
+        default: match = [chroma, 0, secondary]
+        }
+        let bias = light - chroma / 2
+        return NSColor(
+            calibratedRed: min(max(match[0] + bias, 0), 1),
+            green: min(max(match[1] + bias, 0), 1),
+            blue: min(max(match[2] + bias, 0), 1),
+            alpha: min(alpha, 1))
     }
 
     /// Custom insertion point (Monaco: `cursorStyle` + `cursorWidth`).
@@ -1997,6 +2179,30 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// removal before the next scan (edits shift ranges under them).
     private var linkRanges: [NSRange] = []
     private var lastLinksEnabled: Bool?
+    /// Bracket-pair colorization ranges (Monaco:
+    /// `bracketPairColorization`), tracked for removal like the links.
+    var bracketColorRanges: [NSRange] = []
+    /// A diagnostics pass that fired while the view was still windowless
+    /// (the initial fill); flushed on the first in-window pass.
+    var pendingDiagnosticsRefresh = false
+
+    /// Runs the deferred diagnostics pass once the view has a window.
+    func flushPendingDiagnostics(in textView: NSTextView) {
+        guard pendingDiagnosticsRefresh, textView.window != nil else { return }
+        pendingDiagnosticsRefresh = false
+        DispatchQueue.main.async { [weak self, weak textView] in
+            guard let self, let textView, textView.window != nil else { return }
+            self.refreshDiagnostics(in: textView)
+            if parent.find.visible {
+                self.refreshFindHighlights(in: textView)
+            }
+        }
+    }
+    /// Smart-select expansion chain (Monaco: expand/shrink selection):
+    /// the seed through the whole document, and the live index into it.
+    /// Re-seeded lazily whenever the live selection drifts off the head.
+    var smartSelectChain: [NSRange] = []
+    var smartSelectPosition: Int = 0
     /// Editor-local find state: all matches of the active query, the
     /// selected one, and the last mirrored find state (for diffing).
     var findMatches: [NSRange] = []
@@ -2385,7 +2591,16 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         if let textView = rootView?.textView {
             let hasFind = parent.find.visible
             DispatchQueue.main.async { [weak self, weak textView] in
-                guard let self, let textView, textView.window != nil else { return }
+                guard let self, let textView else { return }
+                // The fill happens before SwiftUI attaches the window;
+                // defer to the first in-window pass (updateNSView /
+                // viewDidMoveToWindow) instead of dropping the pass -
+                // otherwise parse diagnostics never show until the first
+                // edit.
+                guard textView.window != nil else {
+                    self.pendingDiagnosticsRefresh = true
+                    return
+                }
                 self.refreshDiagnostics(in: textView)
                 if hasFind {
                     self.refreshFindHighlights(in: textView)
