@@ -12,8 +12,10 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
 - **Incremental highlighting**: one retained parse tree per editor; every
   keystroke repaints only the edited lines plus the parse's changed ranges.
 - **Syntax profiles**: `SyntaxProfile` pairs a tree-sitter grammar with its
-  paint walk. The package ships no grammars - hosts define every language
-  (json, xml, javascript, bash, lua, ...) on their side.
+  paint walk. The core package ships none; the `PlumeLanguages` product
+  layers preset profiles for the common embedded languages (json, xml,
+  javascript, bash, lua) on top, and hosts define further languages on
+  their side.
 - **Injected host integration**: chrome tokens (`EditorTheme`, set at app
   launch), annotation washes, an opaque completion engine, and a formatting
   handler - a host without any of them simply passes nothing.
@@ -22,18 +24,18 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   comment toggling, duplicate/delete/move line, upper/lowercase, sort
   lines, join lines, trim trailing whitespace, read-only selectable mode,
   placeholders, auto-grow and fill-container sizing.
-- **Diagnostics** (Monaco: `setModelMarkers`): host-injected
+- **Diagnostics**: host-injected
   `EditorMarker`s (severity/range/message) render as squiggles, gutter
   dots, and tooltips alongside the parse's own syntax errors; the
   overview ruler (`showsOverviewRuler`) plots them as ticks with a
   viewport band and doubles as click/drag-to-scroll.
-- **Find/replace** (Monaco's find widget): match case, whole word (`ab`),
+- **Find/replace**: match case, whole word (`ab`),
   regular expressions (`.*`, `$1` templates in replacements), preserve
   case (`AB`), match count/index, replace and replace-all.
-- **Indentation & wrapping** (Monaco options): `tabSize`/`insertSpaces`/
+- **Indentation & wrapping**: `tabSize`/`insertSpaces`/
   `detectIndentation` (indent guides track literal tabs too), `wordWrap`
   (`.on`/`.off`/`.column(n)`), and go-to-line accepting `line:column`.
-- **Rendering options** (Monaco options): `rulers`, `renderLineHighlight`
+- **Rendering options**: `rulers`, `renderLineHighlight`
   (`.none`/`.gutter`/`.line`/`.all` + only-when-focus), `renderWhitespace`
   (`.none`/`.trailing`/`.boundary`/`.selection`/`.all`),
   `renderControlCharacters` + `unicodeHighlight`,
@@ -42,13 +44,13 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   `links` (URL runs open on click), `dragAndDropEnabled`, and
   `readOnlyMessage` (a capsule surfaces it when a read-only edit is
   attempted; `onReadOnlyAttempt` forwards it).
-- **Editing feel** (Monaco options): `occurrencesHighlight` (word under
+- **Editing feel**: `occurrencesHighlight` (word under
   the caret washes all its occurrences), `colorDecorators` (inline
   swatches for `#hex`/`rgb()`/`hsl()`), `bracketPairColorization`
   (pairs painted by nesting depth; strings/comments keep their paint),
   and Smart Select (⌃⇧⌘→/←) walking the tree-sitter node ancestry with
   word/line fallbacks.
-- **More rendering options** (Monaco options): `renderFinalNewline`
+- **More rendering options**: `renderFinalNewline`
   (on/off/boundary pilcrow), `overviewRulerBorder` +
   `hideCursorInOverviewRuler`, `cursorSurroundingLines` (jump targets
   keep context lines visible), `fontLigatures`, and
@@ -56,12 +58,12 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   depth).
 - **Host API**: `onSelectionChange` (line/column/length per caret
   move), `formatSelectionHandler` (⌥⇧F with a selection formats the
-  selection only), and `actions` (Monaco `addAction`: context-menu
+  selection only), and `actions` (context-menu
   entries with optional key equivalents).
-- **Find/replace options** (Monaco options): `seedSearchStringFromSelection`,
+- **Find/replace options**: `seedSearchStringFromSelection`,
   `findLoops`, `findCursorMoveOnType`, `autoFindInSelection` (+ ⌥⌘G to
   toggle find-in-selection live).
-- **Language-service hooks** (the Monaco set that makes sense embedded):
+- **Language-service hooks** (the subset that makes sense embedded):
   completions (`suggestFactory` + `triggerCharacters`), hovers
   (`hoverProvider`), markers (`markers`), formatting (`formatHandler`),
   tokens (`SyntaxHighlight`).
@@ -70,30 +72,39 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
 
 ```swift
 import Plume
+import PlumeLanguages
 
 // At app launch: install your chrome (see the token table below).
 EditorTheme.accent = .accentColor
 EditorTheme.spaceMedium = 12
 // ...
 
-// Define a syntax profile over your grammar (package ships none).
+// In a view: bundled presets need no per-language setup.
+Editor(
+    text: $text,
+    annotations: { source in tintedRanges(in: source) },  // optional washes
+    syntax: .json,
+    suggestFactory: { SuggestBridge() },                  // optional
+    placeholder: "Enter a query…")
+```
+
+Languages beyond the presets are host-side `SyntaxProfile`s over the
+core's walks:
+
+```swift
+import Plume
+
+// Define a syntax profile over your grammar (presets cover json, xml,
+// javascript, bash, lua; other languages are host-side).
 extension SyntaxProfile {
-    static let bash = SyntaxProfile(
-        id: "bash",
-        language: { tree_sitter_bash().map { Language($0) } },
+    static let toml = SyntaxProfile(
+        id: "toml",
+        language: { tree_sitter_toml().map { Language($0) } },
         paint: { root, length, cursor, runs in
             myPaintWalk(root, length, &cursor, &runs)   // EditorTheme colors
         },
         commentStyle: .line(prefix: "# "))
 }
-
-// In a view:
-Editor(
-    text: $text,
-    annotations: { source in tintedRanges(in: source) },  // optional washes
-    syntax: .bash,
-    suggestFactory: { SuggestBridge() },                  // optional
-    placeholder: "Enter a query…")
 ```
 
 ### Composing a suggest engine

@@ -9,13 +9,13 @@ struct EditorFindState: Equatable {
     var query = ""
     var replacement = ""
     var caseSensitive = false
-    /// Match a regular expression (Monaco find's `.*` toggle). In regex
+    /// Match a regular expression (the `.*` toggle). In regex
     /// mode the replacement carries `$1`-style capture templates.
     var isRegex = false
-    /// Whole-word matches only (Monaco find's `ab` toggle): neither
+    /// Whole-word matches only (the `ab` toggle): neither
     /// neighbor of a match may be a word character.
     var wholeWord = false
-    /// Shape the replacement's case after each match (Monaco's `AB`
+    /// Shape the replacement's case after each match (the `AB`
     /// toggle; literal mode only - regex replacements carry templates).
     var preserveCase = false
     /// Scope matches to the captured selection.
@@ -73,8 +73,8 @@ struct EditorFindBar: View {
     @FocusState private var replaceFocused: Bool
 
     private let fieldWidth: CGFloat = 300
-    /// The match count's fixed slot (Monaco: `MAX_MATCHES_COUNT_WIDTH`,
-    /// 69px) - reserved so the widget never shifts as the label changes.
+    /// The match count's fixed slot - reserved so the widget never
+    /// shifts as the label changes.
     private let countWidth: CGFloat = 68
 
     /// The widget card's size, MIRRORED from `body`'s fixed layout:
@@ -93,7 +93,7 @@ struct EditorFindBar: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: EditorTheme.spaceXSmall) {
-            // Monaco's Toggle Replace (`.button.toggle`) sits at the
+            // The replace toggle (`.button.toggle`) sits at the
             // widget's leading edge - a chevron that points right while the
             // replace row is collapsed and down while it is open.
             hoverButton(
@@ -104,7 +104,7 @@ struct EditorFindBar: View {
                 replacing.toggle()
             }
             VStack(alignment: .leading, spacing: 6) {
-                // Monaco's find-part order: input (with the option toggles
+                // Find-part order: input (with the option toggles
                 // nested inside its trailing edge), match count,
                 // previous/next, then close. Nothing sits between the input
                 // and its toggles, so there is no dead middle in the bar.
@@ -122,7 +122,7 @@ struct EditorFindBar: View {
                         "Close find bar", isActive: false, help: "Close (Esc)",
                         systemImage: "xmark", action: onClose)
                 }
-                // Monaco's replace-part: the replace input (with `AB`
+                // Replace-part: the replace input (with `AB`
                 // nested inside) then Replace / Replace All, starting at
                 // the same x as the find row's count because both inputs
                 // share a width.
@@ -198,8 +198,8 @@ struct EditorFindBar: View {
     }
 
     /// One input of the bar: the text field with its option toggles as
-    /// SIBLINGS inside the bordered box (Monaco's `.monaco-findInput` is
-    /// the inputbox plus its `.controls`). Siblings rather than an overlay
+    /// SIBLINGS inside the bordered box (the input plus its
+    /// option controls). Siblings rather than an overlay
     /// on the field: an `NSTextField`-backed view keeps its own cursor
     /// over its whole bounds, so an overlay's pointer style never applies
     /// and its buttons stay stuck on the arrow cursor.
@@ -232,7 +232,7 @@ struct EditorFindBar: View {
         )
     }
 
-    /// Monaco always renders a count label - `No results` when nothing
+    /// The count label always renders - `No results` when nothing
     /// matches - so the reserved slot is never an empty hole, and its fixed
     /// width keeps the widget from shifting as the label changes. The
     /// error tint applies only once a query exists (`no-results`), not to
@@ -244,9 +244,9 @@ struct EditorFindBar: View {
                 .font(EditorTheme.fontSmall)
                 .foregroundStyle(query.isEmpty ? EditorTheme.textSecondary : EditorTheme.error)
         } else {
-            // Monaco's label is `NLS_MATCHES_LOCATION` = "{0} of {1}",
+            // Label is "{0} of {1}",
             // with "?" standing in for the position while no match is
-            // current (`matchesPosition === '0'`).
+            // current.
             Text("\(matchIndex.map { String($0 + 1) } ?? "?") of \(matchCount)")
                 .font(EditorTheme.fontSmall.monospacedDigit())
                 .foregroundStyle(EditorTheme.textSecondary)
@@ -287,7 +287,7 @@ struct EditorFindBar: View {
 
 /// The go-to-line mini panel (⌥⌘L): a number field and a Go button,
 /// matching the find bar's overlay language. Accepts `line` or
-/// `line:column` (Monaco's quick-input format); the column is clamped to
+/// `line:column`; the column is clamped to
 /// the line's content.
 struct EditorGoToLineBar: View {
     @Binding var text: String
@@ -331,8 +331,7 @@ struct EditorGoToLineBar: View {
                 .onSubmit(onSubmit)
                 .onExitCommand { onClose() }
                 .onChange(of: text) { _, newValue in
-                    // Digits plus at most one colon (after a digit): the
-                    // Monaco quick-input shape.
+                    // Digits plus at most one colon (after a digit).
                     var filtered = ""
                     var seenColon = false
                     for character in newValue {
@@ -534,8 +533,8 @@ extension EditorCoordinator {
         return beforeClean && afterClean
     }
 
-    /// Shapes `replacement` after `matched`'s case (Monaco's preserve
-    /// case): all-uppercase match -> uppercase replacement, capitalized
+    /// Shapes `replacement` after `matched`'s case (preserve case):
+    /// all-uppercase match -> uppercase replacement, capitalized
     /// match -> capitalized replacement, otherwise as typed.
     static func preservingCase(_ matched: String, _ replacement: String) -> String {
         guard !matched.isEmpty, !replacement.isEmpty else { return replacement }

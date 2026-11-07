@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Severity of a host-injected marker (Monaco: `MarkerSeverity` - the raw
-/// values match so a host bridging Monaco-style diagnostics can pass them
-/// through untouched).
+/// Severity of a host-injected marker. The raw values (hint = 1, info = 2,
+/// warning = 4, error = 8) follow the common editor severity scale, so a
+/// host bridging external diagnostics can pass them through untouched.
 public enum EditorMarkerSeverity: Int, Comparable, Sendable {
     case hint = 1
     case info = 2
@@ -25,8 +25,8 @@ public enum EditorMarkerSeverity: Int, Comparable, Sendable {
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
-/// One host-injected diagnostic (Monaco: `setModelMarkers` / `IMarkerData`,
-/// simplified to the fields an embedded editor renders): a range, a
+/// One host-injected diagnostic, simplified to the fields an embedded
+/// editor renders: a range, a
 /// severity, and a message. Hosts compute ranges against the same text the
 /// editor holds (UTF-16, like `annotations`); markers re-read on every
 /// host update, so stale ranges after edits correct themselves on the next

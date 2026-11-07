@@ -175,7 +175,7 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
         let textLength = (textView.string as NSString).length
 
-        // Caret-line strip (Monaco: renderLineHighlight "gutter"/"all"):
+        // Caret-line strip (renderLineHighlight "gutter"/"all"):
         // the caret's line number draws in the accent color. Off for
         // .none/.line, and when the editor is unfocused under
         // renderLineHighlightOnlyWhenFocus.
@@ -304,7 +304,19 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         let size = text.size(withAttributes: attributes)
         // Right-aligned with a fixed inner gap to the hairline.
         let numberX = bounds.maxX - Self.horizontalPadding - size.width
-        let numberY = origin.y + (fragmentRect.height - size.height) / 2
+        // Baseline-align with the code line: the typesetter anchors the
+        // code baseline at the fragment's bottom minus the font's descent
+        // (verified by x-height-ink and underline-row probes; the ascent
+        // side is quantized by the line-height machinery, so M×ascent
+        // approximations drift ~2pt). Centering the digit in the box rides
+        // it ~2pt high under the balanced metrics; anchoring to the same
+        // baseline puts digit and code ink on one line. NOTE the height,
+        // not maxY: `origin.y` is the band top in GUTTER coordinates
+        // (already carrying the fragment's container-space offset), while
+        // maxY is CONTAINER coordinates - mixing them double-counts every
+        // preceding line and the numbers drift down the view.
+        let codeBaselineY = origin.y + fragmentRect.height + font.descender
+        let numberY = codeBaselineY - font.ascender
         text.draw(at: CGPoint(x: numberX, y: numberY), withAttributes: attributes)
     }
 }

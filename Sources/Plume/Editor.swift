@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Whitespace-visibility mode (Monaco: `renderWhitespace`).
+/// Whitespace-visibility mode.
 public enum WhitespaceMode: Equatable, Sendable {
     /// Nothing drawn.
     case none
@@ -17,7 +17,7 @@ public enum WhitespaceMode: Equatable, Sendable {
     case selection
 }
 
-/// Final-newline pilcrow (Monaco: `renderFinalNewline`).
+/// Final-newline pilcrow mode.
 public enum EditorFinalNewlineMode: Equatable, Sendable {
     /// Always draw a faint ¶ at the final newline.
     case on
@@ -27,8 +27,7 @@ public enum EditorFinalNewlineMode: Equatable, Sendable {
     case boundary
 }
 
-/// Selection position snapshot for `onSelectionChange`
-/// (Monaco: `onDidChangeCursorPosition`).
+/// Selection position snapshot for `onSelectionChange`.
 public struct EditorSelectionSnapshot: Equatable, Sendable {
     /// 1-based caret line.
     public let line: Int
@@ -44,7 +43,7 @@ public struct EditorSelectionSnapshot: Equatable, Sendable {
     }
 }
 
-/// Host-registered action (Monaco: `addAction`): a context-menu entry
+/// Host-registered action: a context-menu entry
 /// with an optional key equivalent, run through the editor's responder.
 public struct EditorAction: @unchecked Sendable {
     public let id: String
@@ -70,8 +69,9 @@ public struct EditorAction: @unchecked Sendable {
     }
 }
 
-/// Line wrapping (Monaco: `wordWrap` + `wordWrapColumn`, with the
-/// `wordWrapColumn`/`bounded` distinction collapsed into one case).
+/// Line wrapping mode (fill the container, never, or wrap at a
+/// column - the `wordWrapColumn`/`bounded` distinction collapsed
+/// into one case).
 public enum EditorWordWrap: Equatable, Sendable {
     /// Lines fill the container width (the historic default).
     case on
@@ -82,7 +82,7 @@ public enum EditorWordWrap: Equatable, Sendable {
     case column(Int)
 }
 
-/// Caret-line highlight (Monaco: `renderLineHighlight`).
+/// Caret-line highlight mode.
 public enum EditorLineHighlightMode: Equatable, Sendable {
     /// No highlight anywhere.
     case none
@@ -94,7 +94,7 @@ public enum EditorLineHighlightMode: Equatable, Sendable {
     case all
 }
 
-/// Diagnostic decoration display (Monaco: `renderValidationDecorations`).
+/// Diagnostic decoration display.
 public enum EditorValidationMode: Equatable, Sendable {
     /// Squiggles only while the editor is editable.
     case editable
@@ -104,8 +104,7 @@ public enum EditorValidationMode: Equatable, Sendable {
     case off
 }
 
-/// Whether ⌘F seeds the query from the selection
-/// (Monaco: `seedSearchStringFromSelection`).
+/// Whether ⌘F seeds the query from the selection.
 public enum EditorSeedSearch: Equatable, Sendable {
     /// Never prefill.
     case never
@@ -115,8 +114,7 @@ public enum EditorSeedSearch: Equatable, Sendable {
     case selection
 }
 
-/// Whether opening find enables “find in selection”
-/// (Monaco: `autoFindInSelection`).
+/// Whether opening find enables “find in selection”.
 public enum EditorAutoFindInSelection: Equatable, Sendable {
     /// Never scope to the selection.
     case never
@@ -126,7 +124,7 @@ public enum EditorAutoFindInSelection: Equatable, Sendable {
     case multiline
 }
 
-/// Insertion-point shape (Monaco: `cursorStyle`).
+/// Insertion-point shape.
 public enum EditorCursorStyle: Equatable, Sendable {
     /// System hairline caret (Plume's historic behavior).
     case line
@@ -136,7 +134,7 @@ public enum EditorCursorStyle: Equatable, Sendable {
     case underline
 }
 
-/// Caret blinking (Monaco: `cursorBlinking`).
+/// Caret blinking mode.
 public enum EditorCursorBlinking: Equatable, Sendable {
     /// System blink (Plume's historic behavior).
     case blink
@@ -144,7 +142,7 @@ public enum EditorCursorBlinking: Equatable, Sendable {
     case solid
 }
 
-/// Extra content padding (Monaco: `padding`). AppKit's
+/// Extra content padding. AppKit's
 /// `textContainerInset` is symmetric, so top+bottom collapse into one
 /// inset height (extra appears split top/bottom).
 public struct EditorPadding: Equatable, Sendable {
@@ -222,137 +220,117 @@ public struct Editor: View {
     var suggestItems: [Any] = []
     /// Cursor/status callback: fired on selection changes and after edits
     /// with the document's size and the caret's position (1-based line and
-    /// column, matching gutter numbering). Monaco:
-    /// `onDidChangeCursorPosition` plus the document stats status bar.
+    /// column, matching gutter numbering), plus the document stats.
     var onStatsChange: ((Editor.Stats) -> Void)?
     /// Hover content provider: given the character range under the pointer,
-    /// returns the tooltip text (nil = no hover). Monaco:
-    /// `registerHoverProvider`. Diagnostics carry their own tooltips which
+    /// returns the tooltip text (nil = no hover). Diagnostics carry their own tooltips which
     /// win when both apply; the provider is consulted only off-diagnostics.
     var hoverProvider: ((_ range: NSRange) -> String?)?
     /// Bracket/quote auto-pairing (insert the closing character, skip over,
-    /// wrap the selection). Monaco: `autoClosingBrackets` ('always'|'never'
-    /// simplified to a Bool). Off for paste/import surfaces where inserted
+    /// wrap the selection). Off for paste/import surfaces where inserted
     /// closers are surprises. Independent of `enablesTypingAssist` (indent
     /// and comments), because pairing alone is what pollutes pastes.
     var enablesAutoPairing: Bool = true
-    /// Visible-whitespace rendering (Monaco: `renderWhitespace`). Trailing
+    /// Visible-whitespace rendering. Trailing
     /// covers the debug-gem cases (JSON tail spaces, RESP line endings)
     /// without the noise of dotting every indent.
     var renderWhitespace: WhitespaceMode = .none
-    /// Host-injected diagnostics (Monaco: `setModelMarkers`): squiggles,
+    /// Host-injected diagnostics: squiggles,
     /// gutter dots, and tooltips rendered alongside the parse's own syntax
     /// errors. Read fresh on every host update; ranges are UTF-16 against
     /// the current text.
     var markers: [EditorMarker] = []
-    /// The overview ruler (Monaco: `overviewRulerLanes`): a narrow strip
+    /// The overview ruler: a narrow strip
     /// right of the text with marker ticks and a viewport band, doubling
     /// as the scroll affordance (click/drag scrolls). Off for compact
     /// editors; worth its 14pt in full-pane surfaces.
     var showsOverviewRuler: Bool = false
-    /// Spaces per indent level (Monaco: `tabSize`; also the tab stop
-    /// width for literal tab characters). Defaults to Plume's historic
-    /// 2; Monaco's default is 4.
+    /// Spaces per indent level; also the tab stop
+    /// width for literal tab characters. Defaults to Plume's historic 2.
     var tabSize: Int = 2
-    /// Indent with spaces when true (Monaco: `insertSpaces`), tab
+    /// Indent with spaces when true, tab
     /// characters when false.
     var insertSpaces: Bool = true
     /// Infer `tabSize`/`insertSpaces` from the document's leading
-    /// whitespace on first fill (Monaco: `detectIndentation`); the
+    /// whitespace on first fill; the
     /// host-passed values are the fallback. Off by default (Plume's
     /// surfaces are single-purpose bodies, not arbitrary files).
     var detectIndentation: Bool = false
-    /// Line wrapping (Monaco: `wordWrap`). `.on` keeps the historic
+    /// Line wrapping. `.on` keeps the historic
     /// fill-the-container behavior; `.off`/`.column(_)` scroll or wrap
     /// horizontally instead.
     var wordWrap: EditorWordWrap = .on
-    /// Column ruler(s) (Monaco: `rulers`). Drawn as hairlines.
+    /// Column ruler(s), drawn as hairlines.
     var rulers: [Int] = []
-    /// Caret-line highlight (Monaco: `renderLineHighlight`).
+    /// Caret-line highlight.
     var renderLineHighlight: EditorLineHighlightMode = .line
-    /// Only render the line highlight while the editor has focus
-    /// (Monaco: `renderLineHighlightOnlyWhenFocus`).
+    /// Only render the line highlight while the editor has focus.
     var renderLineHighlightOnlyWhenFocus: Bool = false
-    /// Allow scrolling past the last line by a viewport
-    /// (Monaco: `scrollBeyondLastLine`).
+    /// Allow scrolling past the last line by a viewport.
     var scrollBeyondLastLine: Bool = false
-    /// Extra right-hand scroll runway in points
-    /// (Monaco: `scrollBeyondLastColumn` ≈ right padding).
+    /// Extra right-hand scroll runway in points (right padding).
     var scrollBeyondLastColumn: CGFloat = 0
-    /// Content top/bottom padding (Monaco: `padding`).
+    /// Content top/bottom padding.
     var editorPadding: EditorPadding = EditorPadding()
-    /// Draw control characters as boxes (Monaco:
-    /// `renderControlCharacters`).
+    /// Draw control characters as boxes.
     var renderControlCharacters: Bool = false
-    /// Underline ambiguous unicode (bidi/zero-width controls)
-    /// (Monaco: `unicodeHighlight`).
+    /// Underline ambiguous unicode (bidi/zero-width controls).
     var unicodeHighlight: Bool = false
-    /// Word-under-caret occurrence wash (Monaco:
-    /// `occurrencesHighlight`). Off keeps the historic selection-only
+    /// Word-under-caret occurrence wash. Off keeps the historic selection-only
     /// highlight.
     var occurrencesHighlight: Bool = false
-    /// Inline color swatches (Monaco: `colorDecorators`).
+    /// Inline color swatches.
     var colorDecorators: Bool = false
-    /// Bracket pairs painted by nesting depth (Monaco:
-    /// `bracketPairColorization`).
+    /// Bracket pairs painted by nesting depth.
     var bracketPairColorization: Bool = false
-    /// Diagnostic squiggle display (Monaco:
-    /// `renderValidationDecorations`).
+    /// Diagnostic squiggle display.
     var renderValidationDecorations: EditorValidationMode = .on
-    /// Message shown when the user types into a read-only editor
-    /// (Monaco: `readOnlyMessage`).
+    /// Message shown when the user types into a read-only editor.
     var readOnlyMessage: String?
     /// Fired with `readOnlyMessage` when a read-only edit is attempted.
     var onReadOnlyAttempt: ((String) -> Void)?
-    /// Automatic link detection (Monaco: `links`). Off keeps Plume's
+    /// Automatic link detection. Off keeps Plume's
     /// historic behavior.
     var linksEnabled: Bool = false
     /// Accept drag-and-drop drops onto the text.
     var dragAndDropEnabled: Bool = true
-    /// Final-newline pilcrow (Monaco: `renderFinalNewline`).
+    /// Final-newline pilcrow.
     var renderFinalNewline: EditorFinalNewlineMode = .off
-    /// Hairline between text and the overview ruler (Monaco:
-    /// `overviewRulerBorder`).
+    /// Hairline between text and the overview ruler.
     var overviewRulerBorder: Bool = true
-    /// Hide the caret tick in the overview ruler (Monaco:
-    /// `hideCursorInOverviewRuler`).
+    /// Hide the caret tick in the overview ruler.
     var hideCursorInOverviewRuler: Bool = false
-    /// Lines kept visible around the caret on jumps (Monaco:
-    /// `cursorSurroundingLines`). Zero keeps the historic behavior.
+    /// Lines kept visible around the caret on jumps.
+    /// Zero keeps the historic behavior.
     var cursorSurroundingLines: Int = 0
-    /// Common ligatures on the text font (Monaco: `fontLigatures`).
+    /// Common ligatures on the text font.
     var fontLigatures: Bool = false
-    /// Vertical guides spanning bracket pairs (Monaco:
-    /// `guides.bracketPairs`).
+    /// Vertical guides spanning bracket pairs.
     var bracketGuides: Bool = false
-    /// Vertical guides at every completed indent level (Monaco:
-    /// `guides.indentation`).
+    /// Vertical guides at every completed indent level.
     var indentGuides: Bool = true
-    /// Fires on every selection change (Monaco:
-    /// `onDidChangeCursorPosition`).
+    /// Fires on every selection change.
     var onSelectionChange: ((EditorSelectionSnapshot) -> Void)?
-    /// Formats the SELECTED text (Monaco: formatSelection); ⌥⇧F with a
+    /// Formats the SELECTED text; ⌥⇧F with a
     /// selection routes here before the whole-document handler.
     var formatSelectionHandler: ((String) throws -> String?)?
-    /// Host-registered actions (Monaco: `addAction`): context-menu
+    /// Host-registered actions: context-menu
     /// entries with optional key equivalents.
     var actions: [EditorAction] = []
-    /// Insertion-point shape (Monaco: `cursorStyle`). `.line` is the
+    /// Insertion-point shape. `.line` is the
     /// system caret.
     var cursorStyle: EditorCursorStyle = .line
     /// Caret thickness in points; 0 = system hairline.
     var cursorWidth: CGFloat = 0
-    /// Caret blinking (Monaco: `cursorBlinking`).
+    /// Caret blinking.
     var cursorBlinking: EditorCursorBlinking = .blink
-    /// Find seeding (Monaco: `seedSearchStringFromSelection`).
+    /// Find seeding.
     var seedSearchStringFromSelection: EditorSeedSearch = .selection
-    /// Wrap-around for Next/Previous (Monaco find `loop`).
+    /// Wrap-around for Next/Previous.
     var findLoops: Bool = true
-    /// Move the caret to the first match while typing a query
-    /// (Monaco find `cursorMoveOnType`).
+    /// Move the caret to the first match while typing a query.
     var findCursorMoveOnType: Bool = true
-    /// Auto-enable find-in-selection on open
-    /// (Monaco: `autoFindInSelection`).
+    /// Auto-enable find-in-selection on open.
     var autoFindInSelection: EditorAutoFindInSelection = .never
 
     /// A point-in-time snapshot of the document's size and caret position.
@@ -369,6 +347,11 @@ public struct Editor: View {
 
     /// Text view insets: the container inset plus the per-fragment padding
     /// make the text origin - the placeholder overlay matches it exactly.
+    /// The container's `lineFragmentPadding` is zeroed (set on the text
+    /// container at setup) so the fragment rects align flush with the text
+    /// origin - the current-line band and selection highlight then share
+    /// identical left/right edges (AppKit's default 5pt padding made the
+    /// band poke out blank on both sides of a selection).
     static let textInset = NSSize(width: 6, height: 6)
     static let fragmentPadding: CGFloat = 5
 
@@ -526,7 +509,7 @@ public struct Editor: View {
         self.autoFindInSelection = autoFindInSelection
     }
 
-    /// Transient read-only notice (Monaco: `readOnlyMessage`).
+    /// Transient read-only notice.
     @State private var readOnlyNotice: String?
 
     public var body: some View {
@@ -792,21 +775,19 @@ struct EditorRepresentable: NSViewRepresentable {
     var renderControlCharacters: Bool = false
     var unicodeHighlight: Bool = false
     /// Word under the caret (empty selection) highlights all its
-    /// occurrences (Monaco: `occurrencesHighlight`). Selected-text
+    /// occurrences. Selected-text
     /// highlighting is the historic behavior and stays always on.
     var occurrencesHighlight: Bool = false
-    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens
-    /// (Monaco: `colorDecorators`).
+    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens.
     var colorDecorators: Bool = false
-    /// Bracket pairs painted by nesting depth (Monaco:
-    /// `bracketPairColorization`); strings/comments keep their own paint.
+    /// Bracket pairs painted by nesting depth;
+    /// strings/comments keep their own paint.
     var bracketPairColorization: Bool = false
     var renderValidationDecorations: EditorValidationMode = .on
     var readOnlyMessage: String?
     var onReadOnlyAttempt: ((String) -> Void)?
     /// Internal bridge: shows `readOnlyMessage` in the editor's own
-    /// capsule when a read-only edit is attempted (Monaco renders its
-    /// message tooltip itself).
+    /// capsule when a read-only edit is attempted.
     var onReadOnlyAttemptNotice: ((String) -> Void)?
     var linksEnabled: Bool = false
     var dragAndDropEnabled: Bool = true
@@ -897,6 +878,9 @@ struct EditorRepresentable: NSViewRepresentable {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        // Flush fragment rects: the band/selection alignment (see the
+        // textInset doc) and the placeholder's 6pt-only text origin.
+        textView.textContainer?.lineFragmentPadding = 0
         textView.textContainerInset = NSSize(
             width: Editor.textInset.width,
             height: Editor.textInset.height + editorPadding.top)
@@ -1026,7 +1010,8 @@ struct EditorRepresentable: NSViewRepresentable {
         }
 
         // Indentation config follows the host until detection has spoken;
-        // tab stops re-apply when the width changed.
+        // tab stops (and the host's line-height multiplier, in the same
+        // paragraph style) re-apply when the width changed.
         if !coordinator.didDetectIndentation {
             let config = EditorCoordinator.IndentConfiguration(
                 tabSize: max(tabSize, 1), insertSpaces: insertSpaces)
@@ -1036,9 +1021,10 @@ struct EditorRepresentable: NSViewRepresentable {
                 textView.needsDisplay = true
             }
         }
+        coordinator.applyTabStops(to: textView)
         coordinator.applyWordWrap(wordWrap, to: textView)
 
-        // Vertical padding (Monaco: `padding.top`): part of the container
+        // Vertical padding: part of the container
         // inset. Idempotent; triggers one height re-report when it moves.
         let insetHeight = Editor.textInset.height + editorPadding.top
         if abs(textView.textContainerInset.height - insetHeight) > 0.5 {
@@ -1324,15 +1310,24 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     override func setSelectedRanges(
         _ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool
     ) {
+        // Mouse in the glyph-less region under the last content line: the
+        // empty trailing line the gutter numbers (TextKit lays out no
+        // fragment for it), plus the space below. AppKit installs the
+        // caret on the final newline through this setter - the click path
+        // never consults `selectionRange(forProposedRange:)`, so the snap
+        // must live here. Dragging (`stillSelecting`) is remapped too, so
+        // the head tracks the document end through the whole drag; IME
+        // composition and reentrant fixups pass through untouched.
+        let effective = mouseExtendedRanges(ranges) ?? ranges
         guard !stillSelecting, !hasMarkedText(), !isFixingSelection else {
-            super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+            super.setSelectedRanges(effective, affinity: affinity, stillSelecting: stillSelecting)
             return
         }
         isFixingSelection = true
         defer { isFixingSelection = false }
         let length = (string as NSString).length
         var clampedAny = false
-        let fixed = ranges.map { value -> NSValue in
+        let fixed = effective.map { value -> NSValue in
             let range = value.rangeValue
             // NSNotFound ("no selection") parks the caret at the end.
             let location =
@@ -1348,10 +1343,10 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             return NSValue(range: NSRange(location: location, length: upperBound - location))
         }
         if clampedAny {
-            EditorSelectionClampLog.log(length: length, ranges: ranges)
+            EditorSelectionClampLog.log(length: length, ranges: effective)
             super.setSelectedRanges(fixed, affinity: affinity, stillSelecting: stillSelecting)
         } else {
-            super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+            super.setSelectedRanges(effective, affinity: affinity, stillSelecting: stillSelecting)
         }
     }
 
@@ -1359,6 +1354,87 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     /// public setter during fixups; the inner call must pass through
     /// un-clamped (its ranges are already in bounds by construction).
     private var isFixingSelection = false
+
+    /// Clicks in the blank region under the laid-out text - the empty
+    /// last line the gutter numbers, plus the space beneath it - hit no
+    /// glyph: TextKit lays out no fragment for the line after a trailing
+    /// newline, and the nearest-glyph fallback parks every such click on
+    /// the final newline (the end of the last content line), so the
+    /// caret visibly bounces back and the last line can never be clicked
+    /// into. Code editors map that region to the document end instead;
+    /// snap the caret/head there before the stock machinery installs its
+    /// range. (The click path installs through `setSelectedRanges`
+    /// instead, which carries the same snap - this override covers the
+    /// proposal-based paths.) Keyboard and programmatic selections keep
+    /// the stock mapping - the snap only applies while a mouse event is
+    /// in flight.
+    override func selectionRange(
+        forProposedRange proposed: NSRange, granularity: NSSelectionGranularity
+    ) -> NSRange {
+        let mouseTypes: [NSEvent.EventType] = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        let belowText =
+            granularity == .selectByCharacter
+            && !string.isEmpty
+            && window?.currentEvent.map { event in
+                mouseTypes.contains(event.type)
+                    && isBelowLaidOutText(convert(event.locationInWindow, from: nil))
+            } == true
+        guard belowText else {
+            return super.selectionRange(forProposedRange: proposed, granularity: granularity)
+        }
+        let length = (string as NSString).length
+        // A caret proposal collapses to the document end; a ranged one
+        // (drag, shift-click) keeps its anchor and moves the head there.
+        if proposed.length == 0 {
+            return NSRange(location: length, length: 0)
+        }
+        return NSRange(
+            location: proposed.location,
+            length: max(NSMaxRange(proposed), length) - proposed.location)
+    }
+
+    /// Whether `point` (view coordinates, flipped) sits at or below the
+    /// bottom of the last CONTENT line fragment - i.e. inside the empty
+    /// trailing line (which has no fragment of its own) or the space
+    /// below it. `usedRect.maxY` can't be used as the threshold: it
+    /// already includes the extra line fragment, so the phantom band
+    /// would measure as laid-out - and clicks on that very band are the
+    /// ones that need the snap.
+    private func isBelowLaidOutText(_ point: NSPoint) -> Bool {
+        guard let layoutManager, let container = textContainer, !string.isEmpty
+        else { return false }
+        layoutManager.ensureLayout(for: container)
+        // The extra line fragment sits directly under the last content
+        // fragment - its top IS the content bottom. (Enumerating line
+        // fragments is the alternative, but the extra fragment already
+        // encodes exactly this edge.)
+        guard layoutManager.extraLineFragmentTextContainer != nil else { return false }
+        return point.y >= textContainerOrigin.y + layoutManager.extraLineFragmentRect.minY
+    }
+
+    /// If the event in flight is a mouse click/drag over the glyph-less
+    /// region under the last content line, returns `ranges` with the
+    /// caret moved to the document end and any range whose head parks on
+    /// the final newline extended through it; nil otherwise (stock
+    /// mapping applies - keyboard and programmatic selections included).
+    private func mouseExtendedRanges(_ ranges: [NSValue]) -> [NSValue]? {
+        guard !isFixingSelection, !hasMarkedText(), !string.isEmpty,
+            let event = window?.currentEvent,
+            [.leftMouseDown, .leftMouseDragged, .leftMouseUp].contains(event.type),
+            isBelowLaidOutText(convert(event.locationInWindow, from: nil))
+        else { return nil }
+        let length = (string as NSString).length
+        return ranges.map { value -> NSValue in
+            let range = value.rangeValue
+            guard range.location != NSNotFound else { return value }
+            if range.length == 0 {
+                return range.location == length
+                    ? value : NSValue(range: NSRange(location: length, length: 0))
+            }
+            guard NSMaxRange(range) == length - 1 else { return value }
+            return NSValue(range: NSRange(location: range.location, length: length - range.location))
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
@@ -1406,7 +1482,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         super.keyDown(with: event)
     }
 
-    // MARK: Read-only edit interception (Monaco: readOnlyMessage)
+    // MARK: Read-only edit interception
 
     // Deletes and cuts have their own responders; every other edit path
     // (typing, paste, IME commit, drops) funnels through insertText.
@@ -1436,7 +1512,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         super.cut(sender)
     }
 
-    /// Text-drop acceptance (Monaco: `dragAndDropEnabled`). The
+    /// Text-drop acceptance. The
     /// TextKit-1 drag-initiation hook (`dragSelectionWithEvent`) no
     /// longer exists on modern SDKs, so the off switch works from the
     /// drop side: text drops (including selection-move drags that land
@@ -1455,7 +1531,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             if coordinator.toggleComment(self) { return true }
             return super.performKeyEquivalent(with: event)
         }
-        // Smart select (Monaco: ⌃⇧⌘→ / ⌃⇧⌘←). Selection-only, so it
+        // Smart select (⌃⇧⌘→ / ⌃⇧⌘←). Selection-only, so it
         // works on read-only editors too - hence ahead of the editable
         // guard below.
         if modifiers == [.control, .shift, .command], event.keyCode == 124 {
@@ -1525,7 +1601,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.pasteAndFormat(in: self)
             return true
         }
-        // Host-registered actions (Monaco: addAction): exact modifier
+        // Host-registered actions: exact modifier
         // match on the key equivalent.
         for action in coordinator.parent.actions {
             guard let key = action.key,
@@ -1653,7 +1729,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         drawCustomCaret()
     }
 
-    /// The band behind the caret's line (Monaco: `renderLineHighlight`).
+    /// The band behind the caret's line.
     private func drawLineBand() {
         guard let coordinator = editorCoordinator else { return }
         switch coordinator.parent.renderLineHighlight {
@@ -1666,11 +1742,18 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             return
         }
         guard !lineBandRect.isEmpty else { return }
-        NSColor(EditorTheme.subtleBackground).withAlphaComponent(0.2).setFill()
+        EditorTheme.lineHighlightBackgroundNS.setFill()
         lineBandRect.fill()
+        let borderWidth = EditorTheme.lineHighlightBorderWidth
+        if borderWidth > 0 {
+            EditorTheme.lineHighlightBorderNS.setStroke()
+            let border = NSBezierPath(rect: lineBandRect)
+            border.lineWidth = borderWidth
+            border.stroke()
+        }
     }
 
-    /// Vertical rulers (Monaco: `rulers`).
+    /// Vertical rulers.
     private func drawRulers(dirtyRect: NSRect) {
         guard let coordinator = editorCoordinator,
             !coordinator.parent.rulers.isEmpty
@@ -1687,9 +1770,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
     }
 
-    /// Control characters (Monaco: `renderControlCharacters`) and
-    /// ambiguous unicode (Monaco: `unicodeHighlight`), drawn as faint
-    /// boxes over the glyphs.
+    /// Control characters and
+    /// ambiguous unicode, drawn as faint boxes over the glyphs.
     private func drawControlCharacters(dirtyRect: NSRect) {
         guard let coordinator = editorCoordinator,
             coordinator.parent.renderControlCharacters || coordinator.parent.unicodeHighlight,
@@ -1750,8 +1832,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
     }
 
-    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens
-    /// (Monaco: `colorDecorators`): a small filled box in the leading
+    /// Inline color swatches before `#hex`/`rgb()`/`hsl()` tokens:
+    /// a small filled box in the leading
     /// margin of the token, with a hairline border so it reads on both
     /// light and dark backgrounds.
     private func drawColorDecorators(dirtyRect: NSRect) {
@@ -1896,8 +1978,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         let depth: Int
     }
 
-    /// Vertical guides spanning bracket pairs (Monaco:
-    /// `guides.bracketPairs`): for every pair whose opener and closer are
+    /// Vertical guides spanning bracket pairs: for every pair whose opener and closer are
     /// in the laid-out range, a faint hairline at the opener's column on
     /// each line strictly between the pair's lines, tinted with the
     /// pair's depth color. Background layer, beside the indent guides.
@@ -1986,7 +2067,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
     }
 
-    /// Faint pilcrow at the final newline (Monaco: `renderFinalNewline`).
+    /// Faint pilcrow at the final newline.
     private func drawFinalNewline() {
         guard let coordinator = editorCoordinator,
             coordinator.parent.renderFinalNewline != .off,
@@ -2018,7 +2099,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                 y: textContainerOrigin.y + fragment.minY + (fragment.height - size.height) / 2))
     }
 
-    /// Custom insertion point (Monaco: `cursorStyle` + `cursorWidth`).
+    /// Custom insertion point (shape + width).
     /// Only runs for the non-default shapes/widths; the system caret
     /// stays for `.line` at 1pt so defaults look exactly as before.
     private func drawCustomCaret() {
@@ -2124,7 +2205,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         }
     }
 
-    /// Whitespace markers (Monaco: `renderWhitespace`): faint middots on
+    /// Whitespace markers: faint middots on
     /// whitespace (`.all` every unit, `.trailing` only the line-end run,
     /// `.boundary` leading/trailing/tabs/space-runs, `.selection` only
     /// inside the selection). Pure draw-layer work over the visible
@@ -2223,7 +2304,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     }
 
     /// Faint vertical guides at every completed indent level of each
-    /// visible line fragment (Monaco: `guides.indentation`). The leading
+    /// visible line fragment. The leading
     /// whitespace is walked unit by unit against the configured `tabSize`:
     /// every `tabSize` spaces - or a literal tab, which renders at
     /// `tabSize` columns via the default paragraph style - completes one
@@ -2274,8 +2355,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             // Walk the leading whitespace run: the cursor advances one
             // space width per space (a boundary completes every
             // `tabSize`) or one unit width per tab, and a guide is drawn
-            // at each completed boundary. Capped at 12 levels like
-            // Monaco's deep indent. Guides are drawn as one continuous
+            // at each completed boundary. Capped at 12 levels
+            // (deep-indent guard). Guides are drawn as one continuous
             // bar per level spanning every line that reaches it, so
             // blocks read as a single line instead of per-row ticks.
             // The bar's X is the actual left edge of the line's first
@@ -2294,8 +2375,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             }
             // First count the completed levels on this line so each
             // level's bar can sit on its own column: level k sits
-            // `(total - k)` indent units left of the text, which is
-            // Monaco's `guides.indentation` layout (one bar per level).
+            // `(total - k)` indent units left of the text - one bar
+            // per level.
             var total = 0
             do {
                 var spaces = 0
@@ -2396,8 +2477,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             setNeedsDisplay(previous.insetBy(dx: -2, dy: -2))
             setNeedsDisplay(lineBandRect.insetBy(dx: -2, dy: -2))
         }
-        // Selection-scoped whitespace markers (Monaco:
-        // renderWhitespace: "selection") repaint on every caret move.
+        // Selection-scoped whitespace markers repaint on every caret move.
         if editorCoordinator?.parent.renderWhitespace == .selection {
             setNeedsDisplay(visibleRect)
         }
@@ -2409,6 +2489,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         else { return .zero }
         let length = (textView.string as NSString).length
         let caret = min(textView.selectedRange().location, length)
+        // Caret on the phantom line (document ends with a newline): the
+        // empty last line has no laid-out fragment of its own - the
+        // layout manager's extra line fragment is its band.
+        if caret == length, layoutManager.extraLineFragmentTextContainer != nil {
+            return layoutManager.extraLineFragmentRect.offsetBy(
+                dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+        }
         let charRange = (textView.string as NSString).lineRange(for: NSRange(location: caret, length: 0))
         guard charRange.length > 0 else { return .zero }
         let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
@@ -2520,7 +2607,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
-        // Read-only interception first (Monaco: readOnlyMessage): every
+        // Read-only interception first: every
         // edit path funnels here, so one guard covers typing, paste, IME
         // commits, and drops.
         guard isEditable else {
@@ -2562,12 +2649,12 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// while `scrollBeyondLastLine` is off); the transition into/out of
     /// managing the document's minSize is edge-triggered on it.
     private var lastScrollOverrun: CGFloat = 0
-    /// Clickable-link temporary-attribute ranges (Monaco: `links`), for
+    /// Clickable-link temporary-attribute ranges, for
     /// removal before the next scan (edits shift ranges under them).
     private var linkRanges: [NSRange] = []
     private var lastLinksEnabled: Bool?
-    /// Bracket-pair colorization ranges (Monaco:
-    /// `bracketPairColorization`), tracked for removal like the links.
+    /// Bracket-pair colorization ranges,
+    /// tracked for removal like the links.
     var bracketColorRanges: [NSRange] = []
     /// A diagnostics pass that fired while the view was still windowless
     /// (the initial fill); flushed on the first in-window pass.
@@ -2585,13 +2672,13 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
             }
         }
     }
-    /// Smart-select expansion chain (Monaco: expand/shrink selection):
+    /// Smart-select expansion chain:
     /// the seed through the whole document, and the live index into it.
     /// Re-seeded lazily whenever the live selection drifts off the head.
     var smartSelectChain: [NSRange] = []
     var smartSelectPosition: Int = 0
-    /// The ligature-enabled variant of the host font (Monaco:
-    /// `fontLigatures`); base monospaced fonts render without ligatures,
+    /// The ligature-enabled variant of the host font;
+    /// base monospaced fonts render without ligatures,
     /// so the flag only ever enables. Cached per host font.
     var textFont: NSFont {
         let base = parent.font.nsFont
@@ -2614,6 +2701,15 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     }
     private var ligatureFontSource: NSFont?
     private var ligatureFontCache: NSFont?
+    /// The shared paragraph style: tab stops from `indent` plus the
+    /// host's line-height multiplier. Rebuilt on access - it is a small
+    /// object, and the restyle funnel runs per edit burst, not per glyph.
+    var paragraphStyle: NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.defaultTabInterval = spaceWidth(for: parent.font.nsFont) * CGFloat(max(indent.tabSize, 1))
+        style.lineHeightMultiple = EditorTheme.lineHeightMultiple
+        return style
+    }
     /// Editor-local find state: all matches of the active query, the
     /// selected one, and the last mirrored find state (for diffing).
     var findMatches: [NSRange] = []
@@ -2632,8 +2728,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// The last reported stats, so repeated identical reports are dropped.
     private var lastStats: Editor.Stats?
 
-    /// Reports document size + caret position (Monaco:
-    /// onDidChangeCursorPosition). Zero new computation: reads the
+    /// Reports document size + caret position. Zero new computation: reads the
     /// highlighter's line ledger that the gutter already maintains.
     func reportStats(in textView: NSTextView) {
         guard let onStatsChange = parent.onStatsChange else { return }
@@ -2657,7 +2752,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// new array re-runs the squiggle pass).
     var hostMarkers: [EditorMarker] = []
     var lastHostMarkers: [EditorMarker] = []
-    /// Indentation configuration (Monaco: `tabSize` + `insertSpaces`),
+    /// Indentation configuration (`tabSize` + `insertSpaces`),
     /// possibly overridden by `detectIndentation` on first fill.
     struct IndentConfiguration: Equatable {
         var tabSize: Int
@@ -2712,18 +2807,22 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         textView.cursorExclusionRect = textView.convert(rootRect, from: root)
     }
 
-    /// Literal tab characters render at `tabSize` columns in both modes
-    /// (Monaco semantics), via the text view's default paragraph style.
+    /// Applies the shared paragraph style (tab stops + line-height) as the
+    /// text view's default and typing attributes, and bakes it into the
+    /// existing text whenever the style's identity changed: the default
+    /// only governs text added afterwards, so an installed multiplier
+    /// reaches the already-filled storage only through a restyle.
     func applyTabStops(to textView: NSTextView) {
-        let width = spaceWidth(for: parent.font.nsFont) * CGFloat(max(indent.tabSize, 1))
-        let style = NSMutableParagraphStyle()
-        style.defaultTabInterval = width
+        let style = paragraphStyle
         if textView.defaultParagraphStyle != style {
             textView.defaultParagraphStyle = style
+            textView.typingAttributes = textView.typingAttributes.merging(
+                [.paragraphStyle: style]) { _, new in new }
+            refreshStyling(in: textView)
             textView.needsDisplay = true
         }
     }
-    /// Applies the wrap mode (Monaco: `wordWrap`): `.on` tracks the text
+    /// Applies the wrap mode: `.on` tracks the text
     /// view's width; `.off`/`.column(_)` release the container width so
     /// lines run long and the scroll view pans horizontally (overlay
     /// scroller enabled for the pan feedback).
@@ -2761,7 +2860,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         textView.needsDisplay = true
         reportContentHeight(textView)
     }
-    /// First-fill detection (Monaco: `detectIndentation`): the majority
+    /// First-fill detection: the majority
     /// style of the document's leading whitespace wins; for spaces, the
     /// GCD of leading runs (clamped 1...8) is the unit.
     func detectIndentationIfNeeded(_ text: String) {
@@ -2883,7 +2982,10 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         if let callback = parent.onSelectionChange {
             let selection = textView.selectedRange()
             let length = (textView.string as NSString).length
-            let offset = length > 0 ? min(selection.location, length - 1) : 0
+            // Unclamped against length (the ledger clamps internally): a
+            // caret on the phantom line after a trailing newline must
+            // report that line, not the previous one.
+            let offset = length > 0 ? min(selection.location, length) : 0
             let (line, column) = highlighter.lineAndColumn(ofUTF16Offset: offset)
             callback(
                 EditorSelectionSnapshot(
@@ -2982,9 +3084,11 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
 
         // Base attributes reset the window (inserted characters arrive
         // unattributed; pasted runs shed their fonts via isRichText=false,
-        // and this normalizes anything else).
+        // and this normalizes anything else). The shared paragraph style
+        // rides along so the host's line-height multiplier applies to the
+        // whole window, not just newly typed text.
         textStorage.setAttributes(
-            [.font: parent.font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS],
+            [.font: parent.font.nsFont, .foregroundColor: EditorTheme.textPrimaryNS, .paragraphStyle: paragraphStyle],
             range: clampedWindow)
         if let runs = result.runs {
             for (range, color) in runs {
@@ -3035,7 +3139,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         guard let storage = textView.textStorage else { return }
         let full = NSRange(location: 0, length: storage.length)
         storage.setAttributes(
-            [.font: textFont, .foregroundColor: EditorTheme.textPrimaryNS],
+            [.font: textFont, .foregroundColor: EditorTheme.textPrimaryNS, .paragraphStyle: paragraphStyle],
             range: full)
         if let runs = SyntaxHighlight.foregroundRuns(in: storage.string, profile: parent.syntax) {
             for (range, color) in runs {
@@ -3063,6 +3167,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
                 attributes: [
                     .font: textFont,
                     .foregroundColor: EditorTheme.textPrimaryNS,
+                    .paragraphStyle: paragraphStyle,
                 ]))
         // Clamp against the storage's LIVE post-edit length, not the
         // parameter's: any drift between the two (a failed or partial set,
@@ -3118,8 +3223,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     }
 
     /// A text-modifying key landed on a read-only editor: surface the
-    /// host's notice (Monaco: `readOnlyMessage` shows its own tooltip;
-    /// Plume shows a bottom-trailing capsule) and fire the host callback.
+    /// host's notice (a bottom-trailing capsule) and fire the host callback.
     func notifyReadOnlyAttempt() {
         guard !parent.isEditable else { return }
         if let message = parent.readOnlyMessage {
@@ -3128,7 +3232,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         parent.onReadOnlyAttempt?(parent.readOnlyMessage ?? "")
     }
 
-    /// Scroll-overrun padding (Monaco: `scrollBeyondLastLine` /
+    /// Scroll-overrun padding (`scrollBeyondLastLine` /
     /// `scrollBeyondLastColumn` + `padding.bottom`). Auto-grow editors
     /// report the height instead (no scrollbar to overfill), so this is a
     /// no-op there. The overrun grows the DOCUMENT view (minSize/frame),
@@ -3181,7 +3285,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         }
     }
 
-    /// Clickable links (Monaco: `links`): URL-shaped runs get the `.link`
+    /// Clickable links: URL-shaped runs get the `.link`
     /// temporary attribute (NSTextView opens them on plain click). Runs
     /// after every styling pass so it survives edits like the squiggles;
     /// short host documents keep the NSDataDetector sweep cheap.
@@ -3272,7 +3376,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         }
     }
 
-    /// Formats the SELECTED text only (Monaco: formatSelection) through
+    /// Formats the SELECTED text only through
     /// the host's `formatSelectionHandler`; returns false when there is
     /// no handler or no selection (the key falls back to the
     /// whole-document handler).

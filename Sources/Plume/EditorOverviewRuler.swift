@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The overview ruler (Monaco: `overviewRulerLanes`): a narrow strip right
+/// The overview ruler: a narrow strip right
 /// of the text showing the whole document's markers at proportional
 /// heights - diagnostics in their severity color, find matches in the
 /// warning color, the caret line in the accent color - plus a subtle band
@@ -44,10 +44,9 @@ final class EditorOverviewRulerView: NSView {
         }
     }
 
-    /// Left hairline separating the ruler from the text (Monaco:
-    /// `overviewRulerBorder`).
+    /// Left hairline separating the ruler from the text.
     var showsBorder = true
-    /// Hide the caret tick (Monaco: `hideCursorInOverviewRuler`).
+    /// Hide the caret tick.
     var hidesCursor = false
 
     // MARK: - Drawing
@@ -121,7 +120,7 @@ final class EditorOverviewRulerView: NSView {
     }
 
     /// Puts the document point at `pointerY` under the pointer's
-    /// proportional position (Monaco's ruler drags the same way).
+    /// proportional position.
     private func scroll(to pointerY: CGFloat) {
         guard let textView, let scrollView = textView.enclosingScrollView,
             bounds.height > 0

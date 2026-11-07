@@ -34,6 +34,17 @@ public enum EditorTheme {
 
     nonisolated(unsafe) public static var textPrimaryNS: NSColor = .labelColor
     nonisolated(unsafe) public static var codeBackgroundNS: NSColor = .textBackgroundColor
+    /// Current-line highlight wash (the band behind the caret's line),
+    /// following the pattern of Monaco's `editor.lineHighlightBackground`:
+    /// a barely-there translucent wash over the code background. The
+    /// default is ~5% labelColor; hosts install their own value.
+    nonisolated(unsafe) public static var lineHighlightBackgroundNS: NSColor =
+        .labelColor.withAlphaComponent(0.05)
+    /// Current-line highlight border (Monaco's `editor.lineHighlightBorder`).
+    /// Set the background above to clear and this token to a visible border
+    /// color to get a pure-border current-line highlight. The default is
+    /// the system separator color; hosts install their own value.
+    nonisolated(unsafe) public static var lineHighlightBorderNS: NSColor = .separatorColor
 
     // MARK: Syntax colors (the paint walks)
 
@@ -62,6 +73,13 @@ public enum EditorTheme {
     nonisolated(unsafe) public static var radiusMedium: CGFloat = 8
     nonisolated(unsafe) public static var lineField: CGFloat = 1
     nonisolated(unsafe) public static var lineFocusedField: CGFloat = 2
+    /// Width of the current-line highlight border (`lineHighlightBorderNS`),
+    /// matching Monaco's 1px line-highlight border by default.
+    nonisolated(unsafe) public static var lineHighlightBorderWidth: CGFloat = 1
+    /// Text line-height multiplier, applied through the paragraph style's
+    /// `lineHeightMultiple` (1 = the font's natural leading; hosts pick a
+    /// larger value for airier code lines, Monaco-style).
+    nonisolated(unsafe) public static var lineHeightMultiple: CGFloat = 1
     nonisolated(unsafe) public static var toggleControlSize: CGFloat = 26
     nonisolated(unsafe) public static var opacityDisabled: Double = 0.45
     nonisolated(unsafe) public static var motionQuick: Animation = .easeOut(duration: 0.12)

@@ -25,8 +25,14 @@ public enum EditorFont {
 
     public var nsFont: NSFont {
         switch self {
-        case .systemSubheadline: NSFont.systemFont(ofSize: size)
-        default: NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        case .systemSubheadline:
+            NSFont.systemFont(ofSize: size)
+        default:
+            // The balanced family (metrics remapped for the installed line
+            // height) when the host installed it at launch; the stock
+            // monospaced font otherwise.
+            EditorFontBalancing.font(size: size, weight: .regular)
+                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
         }
     }
 

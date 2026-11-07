@@ -92,11 +92,11 @@ extension EditorCoordinator {
     }
 }
 
-// MARK: - Line transforms (Monaco built-ins)
+// MARK: - Line transforms
 
 extension EditorCoordinator {
     /// Applies `transform` over the selection's lines in place, keeping
-    /// the block selected (Monaco's transform commands).
+    /// the block selected.
     func transformLines(in textView: NSTextView, transform: (String) -> String) {
         guard textView.isEditable, !textView.hasMarkedText(),
             let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
@@ -120,8 +120,8 @@ extension EditorCoordinator {
         transformLines(in: textView) { $0.lowercased() }
     }
 
-    /// Sorts the selection's lines (locale-aware, like Monaco's sort
-    /// commands); the selection stays on the sorted block.
+    /// Sorts the selection's lines (locale-aware);
+    /// the selection stays on the sorted block.
     func sortLines(in textView: NSTextView, descending: Bool) {
         guard textView.isEditable, !textView.hasMarkedText(),
             let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
@@ -144,7 +144,7 @@ extension EditorCoordinator {
     }
 
     /// Strips trailing spaces/tabs from every line of the document
-    /// (Monaco: Trim Trailing Whitespace) as one undoable step.
+    /// as one undoable step.
     func trimTrailingWhitespace(in textView: NSTextView) {
         guard textView.isEditable, !textView.hasMarkedText() else { return }
         let text = textView.string
@@ -163,8 +163,8 @@ extension EditorCoordinator {
             caret: min(textView.selectedRange().location, (trimmed as NSString).length))
     }
 
-    /// Joins the selection's lines with single spaces (Monaco: Join
-    /// Lines); each seam's surrounding whitespace collapses to one space.
+    /// Joins the selection's lines with single spaces;
+    /// each seam's surrounding whitespace collapses to one space.
     func joinLines(in textView: NSTextView) {
         guard textView.isEditable, !textView.hasMarkedText(),
             let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
@@ -363,8 +363,8 @@ extension EditorCoordinator {
     /// Double-click/selection helper: when the selection is a bare word
     /// (letters, digits, underscore, ≤64 chars), washes every occurrence.
     /// Suspended while the find bar owns the background washes.
-    /// Scroll `range` into view, then honor `cursorSurroundingLines`
-    /// (Monaco: `cursorSurroundingLines`): jump targets keep N of their
+    /// Scroll `range` into view, then honor `cursorSurroundingLines`:
+    /// jump targets keep N of their
     /// lines visible above and below instead of hugging the edge.
     func reveal(_ range: NSRange, in textView: NSTextView) {
         textView.scrollRangeToVisible(range)
@@ -411,7 +411,7 @@ extension EditorCoordinator {
         let selection = textView.selectedRange()
         // The wash target: the selected word, or - when the selection is
         // empty and `occurrencesHighlight` is on - the word under the
-        // caret (Monaco: occurrences on the caret word, selection
+        // caret (occurrences on the caret word; selection
         // highlight always on).
         var word: String?
         if selection.length > 0, selection.length <= 64 {
@@ -456,8 +456,8 @@ extension EditorCoordinator {
         }
     }
 
-    /// The word the caret sits in or immediately follows (Monaco
-    /// highlights the caret's word at either edge). Nil off any word.
+    /// The word the caret sits in or immediately follows (either
+    /// edge counts). Nil off any word.
     fileprivate func caretWordRange(in textView: NSTextView, caret: Int) -> NSRange? {
         let ns = textView.string as NSString
         let length = ns.length
@@ -491,7 +491,7 @@ extension EditorCoordinator {
     }
 }
 
-// MARK: Smart select (Monaco: ⌃⇧⌘→ / ⌃⇧⌘←)
+// MARK: Smart select (⌃⇧⌘→ / ⌃⇧⌘←)
 
 extension EditorCoordinator {
     /// Expands the selection one syntactic level out (word → node chain →
@@ -569,7 +569,7 @@ extension EditorCoordinator {
     }
 }
 
-// MARK: Bracket pair colorization (Monaco: bracketPairColorization)
+// MARK: Bracket pair colorization
 
 extension EditorCoordinator {
     /// Paints ()/[]{} by nesting depth as temporary foreground colors.
@@ -681,7 +681,7 @@ extension EditorCoordinator {
         }
 
         let style = NSNumber(value: NSUnderlineStyle.patternDash.rawValue)
-        // Monaco: renderValidationDecorations — squiggles only when the
+        // Squiggles only when the
         // mode says so (.editable tracks the editor's editability); gutter
         // dots and tooltips always reflect the real diagnostics.
         let showDecorations: Bool
@@ -718,11 +718,10 @@ extension EditorCoordinator {
             gutter.needsDisplay = true
         }
         rootView?.rulerView?.needsDisplay = true
-        // Clickable links re-scan with the same cadence as the squiggles
-        // (Monaco: links): after every edit, over the fresh layout.
+        // Clickable links re-scan with the same cadence as the squiggles:
+        // after every edit, over the fresh layout.
         applyLinks(in: textView)
-        // Bracket pairs re-color with the same cadence (Monaco:
-        // bracketPairColorization).
+        // Bracket pairs re-color with the same cadence.
         applyBracketColors(in: textView)
     }
 }

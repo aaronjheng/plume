@@ -238,8 +238,7 @@ public final class SuggestController: NSObject {
     /// click-outside-to-blur exempt popup picks.
     public var popupWindow: NSWindow? { panel }
 
-    /// Host-declared trigger characters (Monaco's
-    /// `CompletionItemProvider.triggerCharacters`): when the character just
+    /// Host-declared trigger characters: when the character just
     /// typed lands the caret right after one (e.g. `.`, `{`), the suggest
     /// panel opens over the word-mode universe with a zero-width fragment.
     /// nil/empty disables automatic triggering; `showSuggestions(at:)` stays
