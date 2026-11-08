@@ -36,6 +36,15 @@ public enum EditorFont {
         }
     }
 
+    /// The stock monospaced font for this slot, bypassing the balanced
+    /// family. For tight single-line surfaces (URL bars, fixed-height
+    /// fields): the balanced metrics' cap height exceeds its ascent, so
+    /// glyph ink pokes above a natural line box and out of highlight
+    /// washes tuned to the stock metrics.
+    public var unbalancedNSFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     private var size: CGFloat {
         switch self {
         case .systemSubheadline, .monoSubheadline, .monoURLBar, .monoCaption: 12
