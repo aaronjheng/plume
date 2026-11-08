@@ -43,10 +43,17 @@ public enum EditorFontBalancing {
 
     // MARK: Installation
 
-    /// Derives and registers the balanced monospaced family. Call once at
-    /// app launch, before any editor renders; `lineHeightMultiple` must be
-    /// the value installed on `EditorTheme` (the balance is tuned for it).
-    /// Idempotent: a second call with the same multiple is a no-op.
+    /// Derives the balanced monospaced family. Call once at app launch,
+    /// before any editor renders; `lineHeightMultiple` must be the value
+    /// installed on `EditorTheme` (the balance is tuned for it). Idempotent:
+    /// a second call with the same multiple is a no-op.
+    ///
+    /// The derived file is NOT registered with CTFontManager - registration
+    /// scopes (.user/.session) expose the family beyond this process, which
+    /// is exactly the kind of spill this component exists to prevent.
+    /// Instead the descriptors are read straight off the file; each created
+    /// CTFont carries its file reference privately, so the balanced metrics
+    /// exist only inside the font objects this module hands out.
     public static func install(lineHeightMultiple: CGFloat) {
         guard weightDescriptors.isEmpty, registeredFontURL == nil else { return }
         installedForMultiple = lineHeightMultiple
@@ -54,22 +61,34 @@ public enum EditorFontBalancing {
             assertionFailure("EditorFontBalancing: sfnt derivation failed")
             return
         }
+        // Deterministic per tuning (the multiple x100): every launch of
+        // every Plume-hosting app reuses ONE file instead of littering the
+        // temp directory with a fresh copy per launch. Content is
+        // deterministic given the system font version, so concurrent
+        // launches racing to materialize it write identical bytes.
+        let tuningKey = Int(round(lineHeightMultiple * 100))
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlumeBalancedMono-\(UUID().uuidString.prefix(8)).ttf")
-        do {
-            try derived.write(to: url)
-        } catch {
-            assertionFailure("EditorFontBalancing: write failed \(error)")
-            return
+            .appendingPathComponent("PlumeBalancedMono-\(tuningKey).ttf")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("PlumeBalancedMono-\(tuningKey)-\(UUID().uuidString.prefix(8)).tmp")
+            do {
+                try derived.write(to: staging)
+                try FileManager.default.moveItem(at: staging, to: url)
+            } catch {
+                try? FileManager.default.removeItem(at: staging)
+                // A concurrent launch may have materialized it first.
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    assertionFailure("EditorFontBalancing: staging failed \(error)")
+                    return
+                }
+            }
         }
         registeredFontURL = url
-        CTFontManagerRegisterFontURLs(
-            [url as CFURL] as CFArray, .user, true,
-            { _, _ in true })  // accept; failures surface in the lookup below
         guard let descriptors = CTFontManagerCreateFontDescriptorsFromURL(
             url as CFURL) as? [CTFontDescriptor], !descriptors.isEmpty
         else {
-            assertionFailure("EditorFontBalancing: registration produced no descriptors")
+            assertionFailure("EditorFontBalancing: derivation produced no descriptors")
             return
         }
         weightDescriptors = descriptors

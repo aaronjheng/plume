@@ -199,6 +199,15 @@ public struct Editor: View {
     /// comments. Off for prose/paste surfaces where those are surprises.
     var enablesTypingAssist: Bool = true
     var font: EditorFont = .monoSubheadline
+    /// Paragraph line-height multiplier for THIS editor (Monaco's
+    /// `lineHeight` option). 1 is the font's natural leading; a host
+    /// wanting the balanced font's centered glyph ink passes its
+    /// chosen multiple per editor instead of relying on the global
+    /// `EditorTheme` default, so two editors in one process can
+    /// differ (a multi-line pane vs a tight single-line surface).
+    /// Read once at representable creation and refreshed on change
+    /// via `restyleKey`-style updates.
+    var lineHeightMultiple: CGFloat = 1
     var placeholder: String?
     /// While the editor holds keyboard focus, ⌥⇧F runs its text through
     /// this handler as one undoable step. Returns the formatted text, nil
@@ -394,6 +403,7 @@ public struct Editor: View {
         showsGutterSeparator: Bool = false,
         enablesTypingAssist: Bool = true,
         font: EditorFont = .monoSubheadline,
+        lineHeightMultiple: CGFloat = 1,
         placeholder: String? = nil,
         formatHandler: ((String) throws -> String?)? = nil,
         formatActionName: String = "Format",
@@ -458,6 +468,7 @@ public struct Editor: View {
         self.showsGutterSeparator = showsGutterSeparator
         self.enablesTypingAssist = enablesTypingAssist
         self.font = font
+        self.lineHeightMultiple = lineHeightMultiple
         self.placeholder = placeholder
         self.formatHandler = formatHandler
         self.formatActionName = formatActionName
@@ -524,6 +535,7 @@ public struct Editor: View {
             showsGutterSeparator: showsGutterSeparator,
             enablesTypingAssist: enablesTypingAssist,
             font: font,
+            lineHeightMultiple: lineHeightMultiple,
             formatHandler: formatHandler,
             formatActionName: formatActionName,
             onFormatError: onFormatError,
@@ -751,6 +763,7 @@ struct EditorRepresentable: NSViewRepresentable {
     let showsGutterSeparator: Bool
     let enablesTypingAssist: Bool
     let font: EditorFont
+    let lineHeightMultiple: CGFloat
     let formatHandler: ((String) throws -> String?)?
     let formatActionName: String
     let onFormatError: ((String) -> Void)?
@@ -1641,6 +1654,9 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     override func layout() {
         super.layout()
         registerTooltipRect()
+        // The band spans to the view's right edge, so a resize changes
+        // its width without moving the caret or the text.
+        refreshLineBand()
     }
 
     /// One tooltip rect covering the view; re-registered when the bounds
@@ -2489,12 +2505,21 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         else { return .zero }
         let length = (textView.string as NSString).length
         let caret = min(textView.selectedRange().location, length)
+        // Monaco's line highlight spans the full editor width, not just
+        // the laid-out text: stretch the band's right edge to the view's
+        // right edge (at least as wide as the text itself, so long
+        // unwrapped lines are untouched).
+        func fullWidth(_ band: NSRect) -> NSRect {
+            let right = max(band.maxX, textView.bounds.maxX)
+            return NSRect(x: band.minX, y: band.minY, width: right - band.minX,
+                height: band.height)
+        }
         // Caret on the phantom line (document ends with a newline): the
         // empty last line has no laid-out fragment of its own - the
         // layout manager's extra line fragment is its band.
         if caret == length, layoutManager.extraLineFragmentTextContainer != nil {
-            return layoutManager.extraLineFragmentRect.offsetBy(
-                dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+            return fullWidth(layoutManager.extraLineFragmentRect.offsetBy(
+                dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y))
         }
         let charRange = (textView.string as NSString).lineRange(for: NSRange(location: caret, length: 0))
         guard charRange.length > 0 else { return .zero }
@@ -2513,7 +2538,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             first = false
             index = NSMaxRange(fragmentGlyphs)
         }
-        return band
+        return fullWidth(band)
     }
 
     // MARK: Context menu
@@ -2677,11 +2702,18 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// Re-seeded lazily whenever the live selection drifts off the head.
     var smartSelectChain: [NSRange] = []
     var smartSelectPosition: Int = 0
-    /// The ligature-enabled variant of the host font;
-    /// base monospaced fonts render without ligatures,
-    /// so the flag only ever enables. Cached per host font.
+    /// The font this editor's text renders in: the balanced-metrics family
+    /// (vertical centering, see `EditorFontBalancing`) when the host
+    /// installed it, else the slot's stock `nsFont` face - then the
+    /// ligature-enabled variant on top (base monospaced fonts render
+    /// without ligatures, so the flag only ever enables). Balancing is
+    /// scoped HERE, to the text this editor draws: `EditorFont.nsFont`
+    /// stays stock so host surfaces borrowing the descriptor (URL bars,
+    /// fields) never see the remapped metrics. Cached per host font.
     var textFont: NSFont {
-        let base = parent.font.nsFont
+        let slot = parent.font
+        let base = EditorFontBalancing.font(size: slot.size, weight: slot.weight)
+            ?? slot.nsFont
         guard parent.fontLigatures else { return base }
         if ligatureFontSource == base, let cached = ligatureFontCache {
             return cached
@@ -2707,7 +2739,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     var paragraphStyle: NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.defaultTabInterval = spaceWidth(for: parent.font.nsFont) * CGFloat(max(indent.tabSize, 1))
-        style.lineHeightMultiple = EditorTheme.lineHeightMultiple
+        style.lineHeightMultiple = parent.lineHeightMultiple
         return style
     }
     /// Editor-local find state: all matches of the active query, the

@@ -305,17 +305,20 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
         // Right-aligned with a fixed inner gap to the hairline.
         let numberX = bounds.maxX - Self.horizontalPadding - size.width
         // Baseline-align with the code line: the typesetter anchors the
-        // code baseline at the fragment's bottom minus the font's descent
-        // (verified by x-height-ink and underline-row probes; the ascent
-        // side is quantized by the line-height machinery, so M×ascent
+        // code baseline at the fragment's bottom minus the TEXT font's
+        // descent (verified by x-height-ink and underline-row probes; the
+        // ascent side is quantized by the line-height machinery, so M×ascent
         // approximations drift ~2pt). Centering the digit in the box rides
         // it ~2pt high under the balanced metrics; anchoring to the same
         // baseline puts digit and code ink on one line. NOTE the height,
         // not maxY: `origin.y` is the band top in GUTTER coordinates
         // (already carrying the fragment's container-space offset), while
         // maxY is CONTAINER coordinates - mixing them double-counts every
-        // preceding line and the numbers drift down the view.
-        let codeBaselineY = origin.y + fragmentRect.height + font.descender
+        // preceding line and the numbers drift down the view. The descent
+        // is the TEXT font's (balanced metrics drive the fragment
+        // geometry); the digit draws in the gutter's own stock font.
+        let textDescent = coordinator?.textFont.descender ?? font.descender
+        let codeBaselineY = origin.y + fragmentRect.height + textDescent
         let numberY = codeBaselineY - font.ascender
         text.draw(at: CGPoint(x: numberX, y: numberY), withAttributes: attributes)
     }
