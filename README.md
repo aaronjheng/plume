@@ -20,8 +20,9 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   launch), annotation washes, an opaque completion engine, and a formatting
   handler - a host without any of them simply passes nothing.
 - **Editing assists**: enter-line indent carry, Tab/Shift-Tab and ⌘]/⌘[
-  block indent, bracket/quote auto-pairing with skip-over, per-profile
-  comment toggling, duplicate/delete/move line, upper/lowercase, sort
+  block indent, per-language bracket/quote auto-pairing (`SyntaxProfile`
+  brackets + `autoClosing`/`autoSurround`) with skip-over, per-profile
+  comment toggling, duplicate/delete/copy/move line, upper/lowercase, sort
   lines, join lines, trim trailing whitespace, read-only selectable mode,
   placeholders, auto-grow and fill-container sizing.
 - **Diagnostics**: host-injected
@@ -31,21 +32,32 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   viewport band and doubles as click/drag-to-scroll.
 - **Find/replace**: match case, whole word (`ab`),
   regular expressions (`.*`, `$1` templates in replacements), preserve
-  case (`AB`), match count/index, replace and replace-all.
+  case (`AB`), match count/index, replace and replace-all, Up/Down
+  query history, invalid-regex hint, and a retained last search so
+  ⌘G/⌘⇧G still navigate after the bar is dismissed.
 - **Indentation & wrapping**: `tabSize`/`insertSpaces`/
   `detectIndentation` (indent guides track literal tabs too), `wordWrap`
   (`.on`/`.off`/`.column(n)`), and go-to-line accepting `line:column`.
+- **Navigation**: F8/Shift+F8 diagnostic jumps, ⌃⌘D/⌃⌘⇧D word-occurrence
+  selection (⌘D keeps duplicate-lines), editor-local zoom
+  (⌃= / ⌃- / ⌃0, starting from `initialFontScale`), toggle wrap (⌥Z),
+  transpose (⌃T), and auto-outdent for typing `}`/`]`/`)`/`>`.
 - **Rendering options**: `rulers`, `renderLineHighlight`
   (`.none`/`.gutter`/`.line`/`.all` + only-when-focus), `renderWhitespace`
   (`.none`/`.trailing`/`.boundary`/`.selection`/`.all`),
   `renderControlCharacters` + `unicodeHighlight`,
   `renderValidationDecorations`, `scrollBeyondLastLine`/`Column`,
-  `editorPadding`, `cursorStyle`/`cursorWidth`/`cursorBlinking`,
+  `editorPadding`, `cursorStyle`/`cursorWidth`/`cursorBlinking`/
+  `cursorSmoothCaretAnimation` (`.off`/`.on`/`.explicit`),
+  `lineNumbersMode` (`.on`/`.off`/`.relative`/`.interval`),
+  `lineNumbersMinChars`, `renderBracketPairHighlight`,
   `links` (URL runs open on click), `dragAndDropEnabled`, and
   `readOnlyMessage` (a capsule surfaces it when a read-only edit is
-  attempted; `onReadOnlyAttempt` forwards it).
+  attempted; `onReadOnlyAttempt` forwards it). Gutter and ruler
+  visibility follow the host at runtime.
 - **Editing feel**: `occurrencesHighlight` (word under
-  the caret washes all its occurrences), `colorDecorators` (inline
+  the caret washes all its occurrences), `selectionHighlight` (selected
+  text washes all its occurrences), `colorDecorators` (inline
   swatches for `#hex`/`rgb()`/`hsl()`), `bracketPairColorization`
   (pairs painted by nesting depth; strings/comments keep their paint),
   and Smart Select (⌃⇧⌘→/←) walking the tree-sitter node ancestry with
@@ -58,15 +70,21 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   depth).
 - **Host API**: `onSelectionChange` (line/column/length per caret
   move), `formatSelectionHandler` (⌥⇧F with a selection formats the
-  selection only), and `actions` (context-menu
+  selection only), `onFontScaleChange` (observe editor-local zoom),
+  and `actions` (context-menu
   entries with optional key equivalents).
+- **Auto formatting**: `formatOnPaste` (⌘V formats the pasted text) and
+  `formatOnType` (debounced whole-document format after typing pauses);
+  both off by default, manual ⌥⇧F and ⌥⇧⌘V unchanged.
 - **Find/replace options**: `seedSearchStringFromSelection`,
   `findLoops`, `findCursorMoveOnType`, `autoFindInSelection` (+ ⌥⌘G to
   toggle find-in-selection live).
 - **Language-service hooks** (the subset that makes sense embedded):
   completions (`suggestFactory` + `triggerCharacters`), hovers
   (`hoverProvider`), markers (`markers`), formatting (`formatHandler`),
-  tokens (`SyntaxHighlight`).
+  definition jumps (`definitionProvider`, F12/⌘-click), document symbols
+  (`documentSymbolsProvider`, `⌃⇧O`), signature help (`signatureProvider`,
+  `⌃⇧Space` on `(`), tokens (`SyntaxHighlight`).
 
 ## Usage
 
@@ -145,8 +163,8 @@ fall back to neutral system defaults.
 | Surfaces | `controlBackground` `fieldBackground` `subtleBackground` |
 | Tab chrome | `tabHoverBackground` `tabActiveBackground` |
 | Overlay | `popupShadow` |
-| AppKit fills | `textPrimaryNS` `codeBackgroundNS` |
-| Syntax roles | `syntaxKey` `syntaxString` `syntaxNumber` `syntaxKeyword` `syntaxPlain` |
+| AppKit fills | `textPrimaryNS` `codeBackgroundNS` `selectionBackgroundNS?` `insertionPointColorNS?` |
+| Syntax roles | `syntaxKey` `syntaxString` `syntaxNumber` `syntaxKeyword` `syntaxPlain` `syntaxComment?` `syntaxFunction?` `syntaxVariable?` `syntaxConstant?` |
 | Fonts (SwiftUI) | `fontSmall` `fontMonoSubheadline` `fontMonoBody` `fontMonoURLBar` `fontMonoCaption` `fontIconCompact` |
 | Metrics | `spaceXSmall` `spaceSmall` `spaceCompact` `spaceMedium` |
 | Radii | `radiusSmall` `radiusMedium` |

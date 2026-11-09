@@ -140,7 +140,8 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
     /// inside layout and starve the hosting view's layer commits, blanking
     /// the sibling SwiftUI rows around the editor.
     func requiredWidth() -> CGFloat {
-        let digits = max(2, String(max(highlighter?.lineCount ?? 1, 1)).count)
+        let minChars = max(coordinator?.parent.lineNumbersMinChars ?? 0, 0)
+        let digits = max(2, minChars, String(max(highlighter?.lineCount ?? 1, 1)).count)
         let charWidth = ("8" as NSString).size(withAttributes: [.font: font]).width
         return ceil(CGFloat(digits) * charWidth) + 2 * Self.horizontalPadding
     }
@@ -192,6 +193,28 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
                 caretLineNumber = highlighter.lineNumber(ofUTF16Offset: caret)
             }
         }
+        // Relative/interval modes always need the caret line (even when
+        // the caret strip itself is off); interval skips non-10 lines
+        // except the caret line (Monaco `interval`).
+        let lineNumbersMode = coordinator?.parent.lineNumbersMode ?? .on
+        let absoluteCaretLine: Int? = {
+            if lineNumbersMode == .on || lineNumbersMode == .off { return nil }
+            let caret = min(textView.selectedRange().location, max(textLength, 0))
+            return highlighter.lineNumber(ofUTF16Offset: caret)
+        }()
+        func displayedNumber(for line: Int) -> Int? {
+            switch lineNumbersMode {
+            case .on, .off:
+                return line
+            case .relative:
+                guard let anchor = absoluteCaretLine else { return line }
+                return line == anchor ? line : abs(line - anchor)
+            case .interval:
+                guard let anchor = absoluteCaretLine else { return line }
+                if line == anchor { return line }
+                return line % 10 == 0 ? line : nil
+            }
+        }
 
         let numberAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -210,9 +233,11 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
             // Only the fragment that opens a line carries the number.
             if highlighter.isLineStart(charRange.location) {
                 let number = highlighter.lineNumber(ofUTF16Offset: charRange.location)
-                drawNumber(
-                    number, forFragment: fragmentRect, in: textView,
-                    attributes: number == caretLineNumber ? caretAttributes : numberAttributes)
+                if let shown = displayedNumber(for: number) {
+                    drawNumber(
+                        shown, forFragment: fragmentRect, in: textView,
+                        attributes: number == caretLineNumber ? caretAttributes : numberAttributes)
+                }
                 if let severity = lineSeverities[number] {
                     drawMarkerDot(severity, forFragment: fragmentRect, in: textView)
                 }
@@ -227,11 +252,13 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
                 == UInt16(UnicodeScalar("\n").value)
         if endsWithNewline {
             let line = highlighter.lineNumber(ofUTF16Offset: textLength)
-            drawNumber(
-                line,
-                forFragment: layoutManager.extraLineFragmentRect,
-                in: textView,
-                attributes: line == caretLineNumber ? caretAttributes : numberAttributes)
+            if let shown = displayedNumber(for: line) {
+                drawNumber(
+                    shown,
+                    forFragment: layoutManager.extraLineFragmentRect,
+                    in: textView,
+                    attributes: line == caretLineNumber ? caretAttributes : numberAttributes)
+            }
         }
     }
 

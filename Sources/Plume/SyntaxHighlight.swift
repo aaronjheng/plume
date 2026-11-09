@@ -101,7 +101,9 @@ public enum SyntaxHighlight {
         case "number":
             paintJSONLeaf(node, color: NSColor(EditorTheme.syntaxNumber), length: length, cursor: &cursor, runs: &runs)
         case "true", "false", "null":
-            paintJSONLeaf(node, color: NSColor(EditorTheme.syntaxKeyword), length: length, cursor: &cursor, runs: &runs)
+            paintJSONLeaf(
+                node, color: NSColor(EditorTheme.syntaxConstant ?? EditorTheme.syntaxKeyword),
+                length: length, cursor: &cursor, runs: &runs)
         default:
             if node.childCount == 0 {
                 // Unnamed leaves: brackets, colons, commas, ERROR fragments.
@@ -173,7 +175,9 @@ public enum SyntaxHighlight {
         case "PITarget":
             paintXMLLeaf(node, color: NSColor(EditorTheme.syntaxKeyword), length: length, cursor: &cursor, runs: &runs)
         case "Comment":
-            paintXMLLeaf(node, color: NSColor(EditorTheme.syntaxPlain), length: length, cursor: &cursor, runs: &runs)
+            paintXMLLeaf(
+                node, color: NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain),
+                length: length, cursor: &cursor, runs: &runs)
         case "CData":
             paintXMLLeaf(node, color: NSColor(EditorTheme.syntaxString), length: length, cursor: &cursor, runs: &runs)
         case "CharData":
@@ -220,6 +224,12 @@ public enum SyntaxHighlight {
         "this", "await", "async", "yield", "void", "=>",
     ]
 
+    /// JavaScript literal constants painted with the constant token
+    /// (kept inside `jsKeywordTokens` above for host compatibility).
+    public static let jsConstantTokens: Set<String> = [
+        "true", "false", "null", "undefined",
+    ]
+
     /// Walks a JavaScript tree: strings/numbers/comments take the shared
     /// token colors, anonymous keyword tokens the keyword color, and the
     /// callee side of every call (`client.test(...)`) reads as one
@@ -240,7 +250,9 @@ public enum SyntaxHighlight {
         case "number":
             paintJSLeaf(node, color: NSColor(EditorTheme.syntaxNumber), length: length, cursor: &cursor, runs: &runs)
         case "comment":
-            paintJSLeaf(node, color: NSColor(EditorTheme.syntaxPlain), length: length, cursor: &cursor, runs: &runs)
+            paintJSLeaf(
+                node, color: NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain),
+                length: length, cursor: &cursor, runs: &runs)
         case "call_expression":
             for index in 0..<node.childCount {
                 guard let child = node.child(at: index) else { continue }
@@ -252,7 +264,12 @@ public enum SyntaxHighlight {
             }
         default:
             if node.childCount == 0 {
-                if jsKeywordTokens.contains(type) {
+                if jsConstantTokens.contains(type) {
+                    paintJSLeaf(
+                        node,
+                        color: NSColor(EditorTheme.syntaxConstant ?? EditorTheme.syntaxKeyword),
+                        length: length, cursor: &cursor, runs: &runs)
+                } else if jsKeywordTokens.contains(type) {
                     paintJSLeaf(node, color: NSColor(EditorTheme.syntaxKeyword), length: length, cursor: &cursor, runs: &runs)
                 }
             } else {
@@ -277,7 +294,9 @@ public enum SyntaxHighlight {
         guard let type = node.nodeType, !node.isMissing else { return }
         switch type {
         case "identifier", "property_identifier":
-            paintJSLeaf(node, color: NSColor(EditorTheme.syntaxKey), length: length, cursor: &cursor, runs: &runs)
+            paintJSLeaf(
+                node, color: NSColor(EditorTheme.syntaxFunction ?? EditorTheme.syntaxKey),
+                length: length, cursor: &cursor, runs: &runs)
         case "member_expression":
             let objectID = node.child(byFieldName: "object")?.id
             let propertyID = node.child(byFieldName: "property")?.id

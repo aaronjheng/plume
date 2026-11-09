@@ -252,6 +252,111 @@ final class SourceHighlighter {
         return out
     }
 
+    /// Document-outline symbols from the retained tree: function/class/
+    /// method/variable declarations plus JSON object keys, in document
+    /// order (Monaco's `Ctrl+Shift+O` outline). Empty without a tree.
+    /// Best-effort across grammars: name extraction uses the `name`
+    /// field, falling back to the first identifier-like named child.
+    func documentSymbols(in text: String) -> [EditorDocumentSymbol] {
+        guard let tree, let root = tree.rootNode else { return [] }
+        let ns = text as NSString
+        var out: [EditorDocumentSymbol] = []
+        func symbolName(_ node: Node) -> (name: String, range: NSRange)? {
+            guard let nameNode = node.child(byFieldName: "name") ?? firstNameLikeChild(of: node) else { return nil }
+            let range = Self.utf16Range(ofByteRange: nameNode.byteRange)
+            let clamped = NSRange(
+                location: min(max(range.location, 0), ns.length),
+                length: min(max(range.length, 0), max(0, ns.length - min(max(range.location, 0), ns.length))))
+            guard clamped.length > 0 else { return nil }
+            var name = ns.substring(with: clamped)
+            // JSON object keys arrive quoted; Lua function names arrive dotted.
+            if name.hasPrefix("\""), name.hasSuffix("\"") {
+                name = String(name.dropFirst().dropLast())
+            }
+            guard !name.isEmpty else { return nil }
+            return (name, clamped)
+        }
+        func firstNameLikeChild(of node: Node) -> Node? {
+            for index in 0..<node.childCount {
+                guard let child = node.child(at: index), child.isNamed else { continue }
+                let type = child.nodeType ?? ""
+                if type.contains("identifier") || type.contains("function_name")
+                    || type.contains("method") || type == "word" || type == "variable"
+                {
+                    return child
+                }
+            }
+            return nil
+        }
+        func walk(_ node: Node) {
+            if let type = node.nodeType {
+                switch type {
+                case "function_declaration", "function_definition",
+                    "generator_function_declaration":
+                    if let hit = symbolName(node) {
+                        out.append(EditorDocumentSymbol(name: hit.name, range: hit.range, kind: .function))
+                    }
+                case "class_declaration":
+                    if let hit = symbolName(node) {
+                        out.append(EditorDocumentSymbol(name: hit.name, range: hit.range, kind: .class))
+                    }
+                case "method_definition":
+                    if let hit = symbolName(node) {
+                        out.append(EditorDocumentSymbol(name: hit.name, range: hit.range, kind: .method))
+                    }
+                case "variable_declarator":
+                    if let hit = symbolName(node) {
+                        out.append(EditorDocumentSymbol(name: hit.name, range: hit.range, kind: .variable))
+                    }
+                case "assignment_statement":
+                    // Lua `local x =`, `a, b =`: each `variable` lhs is a declaration.
+                    for index in 0..<node.childCount {
+                        guard let child = node.child(at: index), child.nodeType == "variable" else { continue }
+                        let range = Self.utf16Range(ofByteRange: child.byteRange)
+                        let clamped = NSRange(
+                            location: min(max(range.location, 0), ns.length),
+                            length: min(max(range.length, 0), max(0, ns.length - min(max(range.location, 0), ns.length))))
+                        guard clamped.length > 0 else { continue }
+                        let name = ns.substring(with: clamped)
+                        if !name.isEmpty {
+                            out.append(EditorDocumentSymbol(name: name, range: clamped, kind: .variable))
+                        }
+                    }
+                case "pair":
+                    // JSON object key (string node as first named child).
+                    if let key = node.namedChild(at: 0), key.nodeType == "string" {
+                        let range = Self.utf16Range(ofByteRange: key.byteRange)
+                        let clamped = NSRange(
+                            location: min(max(range.location, 0), ns.length),
+                            length: min(max(range.length, 0), max(0, ns.length - min(max(range.location, 0), ns.length))))
+                        guard clamped.length > 0 else { break }
+                        var name = ns.substring(with: clamped)
+                        if name.hasPrefix("\""), name.hasSuffix("\"") {
+                            name = String(name.dropFirst().dropLast())
+                        }
+                        if !name.isEmpty {
+                            out.append(EditorDocumentSymbol(name: name, range: clamped, kind: .key))
+                        }
+                    }
+                default: break
+                }
+            }
+            for index in 0..<node.childCount {
+                if let child = node.child(at: index) { walk(child) }
+            }
+        }
+        walk(root)
+        out.sort { $0.range.location < $1.range.location }
+        // Dedup identical ranges (nested aliases can repeat a name).
+        var seen = Set<String>()
+        var deduped: [EditorDocumentSymbol] = []
+        for symbol in out {
+            let key = "\(symbol.range.location)-\(symbol.range.length)-\(symbol.name)"
+            if seen.insert(key).inserted { deduped.append(symbol) }
+        }
+        return deduped
+    }
+
     /// Whether a UTF-16 offset opens a line (offset 0, or just after `\n`).
     /// The gutter numbers only fragments that start a line, so wrapped
     /// continuations repeat nothing.

@@ -28,12 +28,14 @@ enum LanguagePaints {
         guard let type = node.nodeType, !node.isMissing else { return }
         switch type {
         case "comment":
-            leaf(node, NSColor(EditorTheme.syntaxPlain), length, &cursor, &runs)
+            leaf(node, NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain), length, &cursor, &runs)
         case "string", "raw_string", "heredoc_body", "ansic_string":
             leaf(node, NSColor(EditorTheme.syntaxString), length, &cursor, &runs)
         case "number":
             leaf(node, NSColor(EditorTheme.syntaxNumber), length, &cursor, &runs)
-        case "variable_name", "test_operator":
+        case "variable_name":
+            leaf(node, NSColor(EditorTheme.syntaxVariable ?? EditorTheme.syntaxKey), length, &cursor, &runs)
+        case "test_operator":
             leaf(node, NSColor(EditorTheme.syntaxKey), length, &cursor, &runs)
         default:
             if node.childCount == 0, bashKeywordTokens.contains(type) {
@@ -54,23 +56,34 @@ enum LanguagePaints {
         "repeat", "return", "then", "true", "until", "while",
     ]
 
+    /// Lua literal constants painted with the constant token.
+    private static let luaConstantTokens: Set<String> = [
+        "true", "false", "nil",
+    ]
+
     static func lua(
         node: Node, length: Int, cursor: inout Int, runs: inout [(NSRange, NSColor)]
     ) {
         guard let type = node.nodeType, !node.isMissing else { return }
         switch type {
         case "comment":
-            leaf(node, NSColor(EditorTheme.syntaxPlain), length, &cursor, &runs)
+            leaf(node, NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain), length, &cursor, &runs)
         case "string", "string_content":
             leaf(node, NSColor(EditorTheme.syntaxString), length, &cursor, &runs)
         case "number":
             leaf(node, NSColor(EditorTheme.syntaxNumber), length, &cursor, &runs)
-        case "identifier", "function_name", "method":
-            // API member chains (`redis.call`) read as one key-colored
+        case "function_name", "method":
+            // API member chains (`redis.call`) read as one function-colored
             // surface, matching the core JS callee treatment.
-            leaf(node, NSColor(EditorTheme.syntaxKey), length, &cursor, &runs)
+            leaf(node, NSColor(EditorTheme.syntaxFunction ?? EditorTheme.syntaxKey), length, &cursor, &runs)
+        case "identifier":
+            leaf(node, NSColor(EditorTheme.syntaxVariable ?? EditorTheme.syntaxKey), length, &cursor, &runs)
         default:
-            if node.childCount == 0, luaKeywordTokens.contains(type) {
+            if node.childCount == 0, luaConstantTokens.contains(type) {
+                leaf(
+                    node, NSColor(EditorTheme.syntaxConstant ?? EditorTheme.syntaxKeyword),
+                    length, &cursor, &runs)
+            } else if node.childCount == 0, luaKeywordTokens.contains(type) {
                 leaf(node, NSColor(EditorTheme.syntaxKeyword), length, &cursor, &runs)
             } else {
                 forEachChild(node) { lua(node: $0, length: length, cursor: &cursor, runs: &runs) }

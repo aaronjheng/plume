@@ -63,6 +63,9 @@ struct EditorFindBar: View {
     let matchCount: Int
     let matchIndex: Int?
     let isEditable: Bool
+    // Recent queries, most-recent-first (editor-local; capped at 20).
+    var queryHistory: [String] = []
+    var replacementHistory: [String] = []
     let onNext: () -> Void
     let onPrevious: () -> Void
     let onReplace: () -> Void
@@ -71,6 +74,20 @@ struct EditorFindBar: View {
 
     @FocusState private var findFocused: Bool
     @FocusState private var replaceFocused: Bool
+    /// History browsing: nil means "live field text"; otherwise the
+    /// index into `queryHistory`/`replacementHistory`.
+    @State private var queryHistoryIndex: Int?
+    @State private var replaceHistoryIndex: Int?
+    @State private var queryDraft: String?
+    @State private var replaceDraft: String?
+
+    /// Whether the current query is an uncompilable regex (shown inline
+    /// instead of Monaco's ambiguous "No results").
+    private var isInvalidRegex: Bool {
+        isRegex && !query.isEmpty
+            && (try? NSRegularExpression(
+                pattern: query, options: caseSensitive ? [] : [.caseInsensitive])) == nil
+    }
 
     private let fieldWidth: CGFloat = 300
     /// The match count's fixed slot - reserved so the widget never
@@ -168,7 +185,7 @@ struct EditorFindBar: View {
     }
 
     private var findField: some View {
-        field(text: $query, prompt: "Find", focused: findFocused) {
+        field(text: $query, prompt: "Find", focused: findFocused, isError: isInvalidRegex) {
             HStack(spacing: 2) {
                 hoverButton("Aa", isActive: caseSensitive, help: "Match Case") {
                     caseSensitive.toggle()
@@ -184,6 +201,27 @@ struct EditorFindBar: View {
         .focused($findFocused)
         .onSubmit(onNext)
         .onExitCommand { onClose() }
+        .onKeyPress(.upArrow) {
+            stepHistory(
+                history: queryHistory, index: $queryHistoryIndex,
+                draft: $queryDraft, text: $query, forward: true)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            stepHistory(
+                history: queryHistory, index: $queryHistoryIndex,
+                draft: $queryDraft, text: $query, forward: false)
+            return .handled
+        }
+        .onChange(of: query) { _, newValue in
+            // Typing off the recalled entry returns to the live draft;
+            // recalling it exactly keeps browsing mode.
+            if let index = queryHistoryIndex,
+                queryHistory.indices.contains(index), newValue != queryHistory[index]
+            {
+                queryHistoryIndex = nil
+            }
+        }
     }
 
     private var replaceField: some View {
@@ -195,6 +233,57 @@ struct EditorFindBar: View {
         .focused($replaceFocused)
         .onSubmit(onReplace)
         .onExitCommand { onClose() }
+        .onKeyPress(.upArrow) {
+            stepHistory(
+                history: replacementHistory, index: $replaceHistoryIndex,
+                draft: $replaceDraft, text: $replacement, forward: true)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            stepHistory(
+                history: replacementHistory, index: $replaceHistoryIndex,
+                draft: $replaceDraft, text: $replacement, forward: false)
+            return .handled
+        }
+        .onChange(of: replacement) { _, newValue in
+            if let index = replaceHistoryIndex,
+                replacementHistory.indices.contains(index),
+                newValue != replacementHistory[index]
+            {
+                replaceHistoryIndex = nil
+            }
+        }
+    }
+
+    /// Moves one step through `history` (most-recent-first). Up enters
+    /// browsing (saving the live text as the draft); Down past the
+    /// newest restores the draft. No-ops on an empty history.
+    private func stepHistory(
+        history: [String], index: Binding<Int?>, draft: Binding<String?>,
+        text: Binding<String>, forward: Bool
+    ) {
+        guard !history.isEmpty else { return }
+        if forward {
+            if let current = index.wrappedValue {
+                if current + 1 < history.count {
+                    index.wrappedValue = current + 1
+                    text.wrappedValue = history[current + 1]
+                }
+            } else {
+                draft.wrappedValue = text.wrappedValue
+                index.wrappedValue = 0
+                text.wrappedValue = history[0]
+            }
+        } else if let current = index.wrappedValue {
+            if current > 0 {
+                index.wrappedValue = current - 1
+                text.wrappedValue = history[current - 1]
+            } else {
+                text.wrappedValue = draft.wrappedValue ?? ""
+                index.wrappedValue = nil
+                draft.wrappedValue = nil
+            }
+        }
     }
 
     /// One input of the bar: the text field with its option toggles as
@@ -207,6 +296,7 @@ struct EditorFindBar: View {
         text: Binding<String>,
         prompt: String,
         focused: Bool,
+        isError: Bool = false,
         @ViewBuilder accessory: () -> Accessory
     ) -> some View {
         HStack(spacing: 2) {
@@ -226,10 +316,13 @@ struct EditorFindBar: View {
         .overlay(
             RoundedRectangle(cornerRadius: EditorTheme.radiusSmall, style: .continuous)
                 .strokeBorder(
-                    focused ? EditorTheme.accent : EditorTheme.border,
+                    isError
+                        ? EditorTheme.error
+                        : (focused ? EditorTheme.accent : EditorTheme.border),
                     lineWidth: focused ? EditorTheme.lineFocusedField : EditorTheme.lineField
                 )
         )
+        .help(isError ? "Invalid regular expression" : "")
     }
 
     /// The count label always renders - `No results` when nothing
@@ -239,7 +332,11 @@ struct EditorFindBar: View {
     /// the untouched state.
     @ViewBuilder
     private var countLabel: some View {
-        if matchCount == 0 {
+        if isInvalidRegex {
+            Text("Invalid regex")
+                .font(EditorTheme.fontSmall)
+                .foregroundStyle(EditorTheme.error)
+        } else if matchCount == 0 {
             Text("No results")
                 .font(EditorTheme.fontSmall)
                 .foregroundStyle(query.isEmpty ? EditorTheme.textSecondary : EditorTheme.error)
@@ -386,13 +483,38 @@ extension EditorCoordinator {
     func syncFindState(_ state: EditorFindState, in textView: NSTextView) {
         guard state != lastFindState else { return }
         let wasVisible = lastFindState?.visible ?? false
+        let previous = lastFindState
         lastFindState = state
         guard state.visible else {
+            // Keep the last search for ⌘G after dismissal (Monaco keeps
+            // the last query); scope is dropped on reuse below.
+            if wasVisible, let previous, !previous.query.isEmpty {
+                retainedFindState = previous
+            }
             if wasVisible || !findMatches.isEmpty { clearFind(in: textView) }
             return
         }
+        if !state.query.isEmpty { retainedFindState = state }
         refreshFindHighlights(
             in: textView, selectFirstAfterCaret: parent.findCursorMoveOnType)
+    }
+
+    /// Recomputes matches from the retained search when the bar is
+    /// dismissed and matches were cleared (⌘G/⌘⇧G after close). Drops
+    /// the captured selection scope (offsets go stale as the document
+    /// edits) and anchors the index on the caret, so the next press
+    /// lands after the caret instead of at the top. No washes are drawn
+    /// while the bar is hidden.
+    private func ensureRetainedMatches(in textView: NSTextView) {
+        guard findMatches.isEmpty else { return }
+        let base = retainedFindState ?? parent.find
+        guard !base.query.isEmpty else { return }
+        var state = base
+        state.inSelection = false
+        findMatches = Self.scopedFindMatches(in: textView.string, state: state)
+        // nil index: findNext/previous anchor on the caret (see below).
+        findCurrentIndex = nil
+        parent.findHooks?.countChanged(findMatches.count, findCurrentIndex)
     }
 
     func refreshFindHighlights(in textView: NSTextView) {
@@ -581,32 +703,48 @@ extension EditorCoordinator {
     }
 
     func findNext(in textView: NSTextView) {
+        ensureRetainedMatches(in: textView)
         guard !findMatches.isEmpty else { return }
-        let current = findCurrentIndex ?? -1
         let next: Int
-        if parent.findLoops {
-            next = (current + 1) % findMatches.count
+        if let current = findCurrentIndex {
+            if parent.findLoops {
+                next = (current + 1) % findMatches.count
+            } else {
+                next = min(current + 1, findMatches.count - 1)
+            }
         } else {
-            next = min(current + 1, findMatches.count - 1)
+            // Retained search (bar dismissed): land on the first match
+            // after the caret, wrapping to the top.
+            let caret = textView.selectedRange().location
+            next = findMatches.firstIndex(where: { NSMaxRange($0) > caret }) ?? 0
         }
         findCurrentIndex = next
-        applyFindHighlights(in: textView)
+        if parent.find.visible { applyFindHighlights(in: textView) }
         textView.setSelectedRange(findMatches[next])
         reveal(findMatches[next], in: textView)
         parent.findHooks?.countChanged(findMatches.count, next)
     }
 
     func findPrevious(in textView: NSTextView) {
+        ensureRetainedMatches(in: textView)
         guard !findMatches.isEmpty else { return }
-        let current = findCurrentIndex ?? findMatches.count
         let previous: Int
-        if parent.findLoops {
-            previous = (current - 1 + findMatches.count) % findMatches.count
+        if let current = findCurrentIndex {
+            if parent.findLoops {
+                previous = (current - 1 + findMatches.count) % findMatches.count
+            } else {
+                previous = max(current - 1, 0)
+            }
         } else {
-            previous = max(current - 1, 0)
+            // Retained search: land on the last match before the caret,
+            // wrapping to the bottom.
+            let caret = textView.selectedRange().location
+            previous =
+                findMatches.lastIndex(where: { $0.location < caret })
+                ?? findMatches.count - 1
         }
         findCurrentIndex = previous
-        applyFindHighlights(in: textView)
+        if parent.find.visible { applyFindHighlights(in: textView) }
         textView.setSelectedRange(findMatches[previous])
         reveal(findMatches[previous], in: textView)
         parent.findHooks?.countChanged(findMatches.count, previous)

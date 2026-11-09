@@ -45,6 +45,13 @@ public enum EditorTheme {
     /// color to get a pure-border current-line highlight. The default is
     /// the system separator color; hosts install their own value.
     nonisolated(unsafe) public static var lineHighlightBorderNS: NSColor = .separatorColor
+    /// Selection wash. Nil keeps the system selection color (Plume's
+    /// historic behavior); hosts set it to tint selections Monaco-style
+    /// (`editor.selectionBackground`). Set once at app launch.
+    nonisolated(unsafe) public static var selectionBackgroundNS: NSColor?
+    /// Insertion-point color. Nil keeps the accent color; hosts set it to
+    /// decouple the caret from the accent (Monaco's `editorCursor.foreground`).
+    nonisolated(unsafe) public static var insertionPointColorNS: NSColor?
 
     // MARK: Syntax colors (the paint walks)
 
@@ -53,6 +60,18 @@ public enum EditorTheme {
     nonisolated(unsafe) public static var syntaxNumber: Color = .purple
     nonisolated(unsafe) public static var syntaxKeyword: Color = .pink
     nonisolated(unsafe) public static var syntaxPlain: Color = .secondary
+    /// Comment token (Monaco `comment`). Nil aliases `syntaxPlain`, so
+    /// hosts that have not installed it keep the historic comment color.
+    nonisolated(unsafe) public static var syntaxComment: Color?
+    /// Function-name token (call callees, Lua `function_name`/`method`).
+    /// Nil aliases `syntaxKey`, so existing guest palettes are unchanged.
+    nonisolated(unsafe) public static var syntaxFunction: Color?
+    /// Variable token (Lua identifiers, Bash names). Nil aliases
+    /// `syntaxKey`, so existing guest palettes are unchanged.
+    nonisolated(unsafe) public static var syntaxVariable: Color?
+    /// Constant token (`true`/`false`/`null`/`nil`/`undefined`). Nil
+    /// aliases `syntaxKeyword`, so existing guest palettes are unchanged.
+    nonisolated(unsafe) public static var syntaxConstant: Color?
 
     // MARK: Fonts (SwiftUI side; `EditorFont` derives the NSFont pair)
 

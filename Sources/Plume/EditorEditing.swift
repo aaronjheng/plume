@@ -90,6 +90,75 @@ extension EditorCoordinator {
                     length: selected.range.length))
         }
     }
+
+    /// ⌥⇧↑ / ⌥⇧↓: copies the selection's lines above/below, keeping the
+    /// selection on the original block (copy-down: original stays put;
+    /// copy-up: original shifts down by the copy height).
+    func copyLines(in textView: NSTextView, up: Bool) {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
+        else { return }
+        let text = textView.string as NSString
+        if up {
+            // Insert `block + \n` at the block start; the original block
+            // is pushed down by the copy height, so the selection follows
+            // it there.
+            let copyHeight = (selected.block as NSString).length + 1
+            replace(
+                in: textView,
+                range: NSRange(location: selected.range.location, length: 0),
+                with: selected.block + "\n",
+                caret: selected.range.location + copyHeight)
+            textView.setSelectedRange(
+                NSRange(
+                    location: selected.range.location + copyHeight,
+                    length: selected.range.length))
+        } else {
+            let insertLocation = NSMaxRange(selected.range)
+            let atEnd = insertLocation >= text.length
+            let inserted = atEnd ? "\n" + selected.block : selected.block + "\n"
+            replace(
+                in: textView,
+                range: NSRange(location: insertLocation, length: 0),
+                with: inserted,
+                caret: selected.range.location)
+            // Selection stays on the original block (unchanged offset).
+            textView.setSelectedRange(selected.range)
+        }
+    }
+
+    /// ⌃T: swaps the characters before and after the caret (Monaco
+    /// `transposeChars`). At the document end the last two swap; at the
+    /// start nothing swaps. Skips surrogate halves and selections.
+    func transposeCharacters(in textView: NSTextView) {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            textView.selectedRange().length == 0
+        else { return }
+        let ns = textView.string as NSString
+        let caret = textView.selectedRange().location
+        guard ns.length >= 2 else { return }
+        let swapAt: Int
+        if caret <= 0 {
+            return
+        } else if caret >= ns.length {
+            swapAt = ns.length - 2
+        } else {
+            swapAt = caret - 1
+        }
+        guard swapAt >= 0, swapAt + 1 < ns.length else { return }
+        let isSurrogate: (unichar) -> Bool = { $0 >= 0xD800 && $0 <= 0xDFFF }
+        let unitA = ns.character(at: swapAt)
+        let unitB = ns.character(at: swapAt + 1)
+        if isSurrogate(unitA) || isSurrogate(unitB) { return }
+        let first = ns.substring(with: NSRange(location: swapAt, length: 1))
+        let second = ns.substring(with: NSRange(location: swapAt + 1, length: 1))
+        guard first != second else { return }
+        replace(
+            in: textView,
+            range: NSRange(location: swapAt, length: 2),
+            with: second + first,
+            caret: min(swapAt + 2, ns.length))
+    }
 }
 
 // MARK: - Line transforms
@@ -197,6 +266,7 @@ extension EditorCoordinator {
             let valid = range.intersection(length)
             guard valid.length > 0 else { continue }
             layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: valid)
+            layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: valid)
         }
         bracketHighlightRanges = []
         guard textView.selectedRange().length == 0 else { return }
@@ -215,6 +285,11 @@ extension EditorCoordinator {
         ]
         for range in bracketHighlightRanges {
             layoutManager.addTemporaryAttribute(.foregroundColor, value: NSColor(EditorTheme.accent), forCharacterRange: range)
+            if parent.renderBracketPairHighlight {
+                layoutManager.addTemporaryAttribute(
+                    .backgroundColor, value: NSColor(EditorTheme.accent).withAlphaComponent(0.18),
+                    forCharacterRange: range)
+            }
         }
     }
 
@@ -355,6 +430,157 @@ extension EditorCoordinator {
                 caret: caret - 1)
         }
     }
+
+    // MARK: Definition navigation
+
+    /// F12 / ⌘-click: jumps to the definition of the token under the caret
+    /// (Monaco `gotoDefinition`), using the host's `definitionProvider`.
+    /// Selection-only: works in read-only editors. No-ops without a
+    /// provider or when the provider has nowhere to go.
+    func goToDefinition(in textView: NSTextView) {
+        guard let provider = parent.definitionProvider,
+            !textView.hasMarkedText()
+        else { return }
+        let selection = textView.selectedRange()
+        let length = (textView.string as NSString).length
+        let token: NSRange
+        if selection.length > 0 {
+            let clamped = selection.clampedToString(length)
+            token = clamped.length > 0 ? clamped : NSRange(location: min(selection.location, length), length: 0)
+        } else {
+            let caret = min(max(selection.location, 0), length)
+            token =
+                caretWordRange(in: textView, caret: caret)
+                ?? NSRange(location: caret, length: 0)
+        }
+        guard token.length > 0,
+            let target = provider(token)
+        else { return }
+        let clamped = target.clampedToString(length)
+        guard clamped.length > 0 else { return }
+        textView.setSelectedRange(clamped)
+        reveal(clamped, in: textView)
+    }
+
+    /// ⌘-click variant: jumps the definition of the token at the pointer.
+    func goToDefinition(atCharacterIndex index: Int, in textView: NSTextView) {
+        guard let provider = parent.definitionProvider,
+            !textView.hasMarkedText()
+        else { return }
+        let length = (textView.string as NSString).length
+        let clamped = min(max(index, 0), length)
+        let token =
+            caretWordRange(in: textView, caret: clamped)
+            ?? NSRange(location: clamped, length: 0)
+        guard token.length > 0,
+            let target = provider(token)
+        else { return }
+        let targetClamped = target.clampedToString(length)
+        guard targetClamped.length > 0 else { return }
+        textView.setSelectedRange(targetClamped)
+        reveal(targetClamped, in: textView)
+    }
+
+    // MARK: Diagnostics navigation
+
+    /// F8 / Shift+F8: jumps to the next/previous diagnostic (Monaco
+    /// `gotoNext/PreviousDiagnostic`), wrapping around. Selection-only:
+    /// lands on the diagnostic's range and reveals it. No-op without
+    /// diagnostics.
+    func goToDiagnostic(in textView: NSTextView, up: Bool) {
+        let entries = diagnosticEntries.sorted { $0.range.location < $1.range.location }
+        guard !entries.isEmpty else { return }
+        let caret = textView.selectedRange().location
+        if up {
+            // Last entry starting before the caret; when the caret sits
+            // inside an entry, that entry itself counts as "here".
+            let target =
+                entries.last(where: { $0.range.location < caret })
+                ?? entries.last
+            guard let target else { return }
+            textView.setSelectedRange(target.range)
+            reveal(target.range, in: textView)
+        } else {
+            let target =
+                entries.first(where: { NSMaxRange($0.range) > caret })
+                ?? entries.first
+            guard let target else { return }
+            textView.setSelectedRange(target.range)
+            reveal(target.range, in: textView)
+        }
+    }
+
+    // MARK: Select next/previous match
+
+    /// ⌃⌘D / ⌃⌘⇧D: selects the next/previous occurrence of the word under
+    /// the caret (or of the current selection). Single-caret fallback for
+    /// Monaco's multi-cursor add-selection: the selection moves instead
+    /// of growing. Whole-word matching for word targets, literal
+    /// case-insensitive otherwise; wraps like `findLoops`.
+    func selectNextMatch(in textView: NSTextView) {
+        selectOccurrence(in: textView, forward: true)
+    }
+
+    func selectPreviousMatch(in textView: NSTextView) {
+        selectOccurrence(in: textView, forward: false)
+    }
+
+    private func selectOccurrence(in textView: NSTextView, forward: Bool) {
+        let ns = textView.string as NSString
+        let selection = textView.selectedRange()
+        var target: String?
+        var wholeWord = false
+        var anchor = selection.location
+        var searchStart = NSMaxRange(selection)
+        if selection.length > 0 {
+            let candidate = ns.substring(with: selection)
+            guard !candidate.isEmpty, !candidate.contains("\n") else { return }
+            target = candidate
+            wholeWord = candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
+            anchor = selection.location
+            searchStart = NSMaxRange(selection)
+        } else {
+            let caret = min(max(selection.location, 0), ns.length)
+            guard let wordRange = caretWordRange(in: textView, caret: caret),
+                wordRange.length > 0
+            else { return }
+            target = ns.substring(with: wordRange)
+            wholeWord = true
+            anchor = wordRange.location
+            searchStart = NSMaxRange(wordRange)
+        }
+        guard let target, !target.isEmpty else { return }
+        let matches = Self.findMatches(
+            in: textView.string, query: target, caseSensitive: false,
+            isRegex: false, wholeWord: wholeWord)
+        guard !matches.isEmpty else { return }
+        // Current slot: the match equal to the selection (or containing
+        // the caret word); navigation starts one past it.
+        let currentIndex =
+            matches.firstIndex(where: { $0 == selection })
+            ?? matches.firstIndex(where: { NSLocationInRange(anchor, $0) || $0.location == anchor })
+        let next: NSRange?
+        if forward {
+            if let currentIndex {
+                next = matches[(currentIndex + 1) % matches.count]
+            } else {
+                next =
+                    matches.first(where: { $0.location >= searchStart })
+                    ?? matches.first
+            }
+        } else {
+            if let currentIndex {
+                next = matches[(currentIndex - 1 + matches.count) % matches.count]
+            } else {
+                next =
+                    matches.last(where: { NSMaxRange($0) <= anchor })
+                    ?? matches.last
+            }
+        }
+        guard let next else { return }
+        textView.setSelectedRange(next)
+        reveal(next, in: textView)
+    }
 }
 
 // MARK: - Word occurrence highlight
@@ -414,6 +640,7 @@ extension EditorCoordinator {
         // caret (occurrences on the caret word; selection
         // highlight always on).
         var word: String?
+        var wholeWord = true
         if selection.length > 0, selection.length <= 64 {
             let candidate = (textView.string as NSString).substring(with: selection)
             if !candidate.isEmpty,
@@ -421,7 +648,17 @@ extension EditorCoordinator {
             {
                 word = candidate
             }
-        } else if selection.length == 0, parent.occurrencesHighlight {
+        }
+        if word == nil, selection.length > 0, parent.selectionHighlight,
+            selection.length <= 200
+        {
+            let candidate = (textView.string as NSString).substring(with: selection)
+            if !candidate.isEmpty, !candidate.contains("\n") {
+                word = candidate
+                wholeWord = false
+            }
+        }
+        if word == nil, selection.length == 0, parent.occurrencesHighlight {
             if let range = caretWordRange(in: textView, caret: min(selection.location, length)),
                 range.length <= 64
             {
@@ -437,14 +674,19 @@ extension EditorCoordinator {
             let found = ns.range(of: word, options: [.caseInsensitive], range: searchRange)
             guard found.location != NSNotFound else { break }
             // Whole-word: neither neighbor may be a word character.
-            let beforeClean =
-                found.location == 0
-                || !isWordChar(codeEditorChar(ns, found.location - 1))
-            let afterClean =
-                NSMaxRange(found) >= length
-                || !isWordChar(codeEditorChar(ns, NSMaxRange(found)))
-            if beforeClean, afterClean {
+            // Plain selection-highlighted text skips the boundary check.
+            if !wholeWord {
                 ranges.append(found)
+            } else {
+                let beforeClean =
+                    found.location == 0
+                    || !isWordChar(codeEditorChar(ns, found.location - 1))
+                let afterClean =
+                    NSMaxRange(found) >= length
+                    || !isWordChar(codeEditorChar(ns, NSMaxRange(found)))
+                if beforeClean, afterClean {
+                    ranges.append(found)
+                }
             }
             searchRange.location = NSMaxRange(found)
             searchRange.length = length - searchRange.location
@@ -749,32 +991,43 @@ extension NSRange {
 // MARK: - Paste and format
 
 extension EditorCoordinator {
+    /// Attempts one paste of `pasted` through the format handler.
+    /// Returns true when the formatted insert was consumed (the caller
+    /// must not fall back to a plain paste); false means the handler is
+    /// missing or the text does not parse and the caller should paste
+    /// plainly. The insert itself suppresses `formatOnType` rescheduling.
+    func formatPastedString(_ pasted: String, in textView: NSTextView) -> Bool {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let formatHandler = parent.formatHandler, !pasted.isEmpty
+        else { return false }
+        let formatted: String
+        do {
+            formatted = try formatHandler(pasted) ?? pasted
+        } catch {
+            return false
+        }
+        let range = textView.selectedRange()
+        guard textView.shouldChangeText(in: range, replacementString: formatted) else { return true }
+        isFormatting = true
+        textView.textStorage?.replaceCharacters(in: range, with: formatted)
+        textView.didChangeText()
+        isFormatting = false
+        textView.setSelectedRange(NSRange(location: range.location + (formatted as NSString).length, length: 0))
+        return true
+    }
+
     /// ⌥⇧⌘V / context menu: pastes the pasteboard string through the
     /// format handler (minified JSON lands pretty-printed). Falls back to
     /// a plain paste when there is no handler, the pasteboard is empty,
     /// or the text does not parse.
     func pasteAndFormat(in textView: NSTextView) {
-        guard textView.isEditable,
-            let formatHandler = parent.formatHandler,
-            let pasted = NSPasteboard.general.string(forType: .string),
-            !pasted.isEmpty
+        guard let pasted = NSPasteboard.general.string(forType: .string), !pasted.isEmpty,
+            textView.isEditable
         else {
             textView.pasteAsPlainText(nil)
             return
         }
-        let formatted: String
-        do {
-            formatted = try formatHandler(pasted) ?? pasted
-        } catch {
-            // Unparseable paste falls back to a normal paste; the user can
-            // reach the diagnostic through ⌥⇧F on the result.
-            textView.pasteAsPlainText(nil)
-            return
-        }
-        let range = textView.selectedRange()
-        guard textView.shouldChangeText(in: range, replacementString: formatted) else { return }
-        textView.textStorage?.replaceCharacters(in: range, with: formatted)
-        textView.didChangeText()
-        textView.setSelectedRange(NSRange(location: range.location + (formatted as NSString).length, length: 0))
+        if formatPastedString(pasted, in: textView) { return }
+        textView.pasteAsPlainText(nil)
     }
 }
