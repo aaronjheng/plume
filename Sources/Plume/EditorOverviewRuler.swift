@@ -54,11 +54,13 @@ final class EditorOverviewRulerView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let safe = dirtyRect.intersection(bounds)
         guard !safe.isNull, safe.width > 0, safe.height > 0 else { return }
-        EditorTheme.codeBackgroundNS.setFill()
-        safe.fill()
-        // Left hairline separating the ruler from the text.
+        // Transparent: the caret-line band passes beneath the strip and
+        // the scrollbar elements (viewport band, ticks) draw on top of it
+        // (Monaco: the ruler overlays the content's right edge).
+        // Left hairline separating the ruler from the text (Monaco:
+        // editorOverviewRuler.border, 30% gray).
         if showsBorder {
-            NSColor(EditorTheme.border).setFill()
+            EditorTheme.overviewRulerBorderNS.setFill()
             NSRect(x: bounds.minX, y: bounds.minY, width: 1, height: bounds.height).fill()
         }
 
@@ -72,23 +74,7 @@ final class EditorOverviewRulerView: NSView {
             track.minY + CGFloat(min(max(offset, 0), length)) / CGFloat(length) * track.height
         }
 
-        // Viewport band first (under everything): where the user is.
-        if let clipView = textView.enclosingScrollView?.contentView {
-            let documentHeight = max(
-                textView.layoutManager?.usedRect(for: textView.textContainer ?? NSTextContainer()).height
-                    ?? textView.bounds.height,
-                clipView.bounds.height)
-            if documentHeight > 0 {
-                let top = min(max(clipView.bounds.minY / documentHeight, 0), 1)
-                let bottom = min(max((clipView.bounds.minY + clipView.bounds.height) / documentHeight, 0), 1)
-                let bandTop = track.minY + top * track.height
-                let bandHeight = (bottom - top) * track.height
-                EditorTheme.textPrimaryNS.withAlphaComponent(0.06).setFill()
-                NSRect(x: track.minX, y: bandTop, width: track.width, height: max(bandHeight, 2)).fill()
-            }
-        }
-
-        // Find matches: warning ticks (under diagnostics).
+        // Find matches: warning ticks (under the slider thumb).
         let findColor = NSColor(EditorTheme.warning).withAlphaComponent(0.75)
         findColor.setFill()
         for range in coordinator.findMatches {
@@ -101,11 +87,30 @@ final class EditorOverviewRulerView: NSView {
             NSRect(x: track.minX + track.width * 0.2, y: yFraction(entry.range.location) - 1, width: track.width * 0.8, height: 2).fill()
         }
 
-        // Caret line: accent tick.
-        if !hidesCursor {
-            let caret = min(textView.selectedRange().location, length)
-            NSColor(EditorTheme.accent).setFill()
-            NSRect(x: track.minX, y: yFraction(caret) - 0.5, width: track.width, height: 1).fill()
+        // Slider thumb LAST (Monaco draws the scrollbar over the ruler
+        // canvas): full strip width, viewport-proportional height, min
+        // 20pt (Monaco's MINIMUM_SLIDER_SIZE), and nothing at all when
+        // the content fits the viewport (Monaco skips the slider then).
+        if let clipView = textView.enclosingScrollView?.contentView {
+            let contentHeight =
+                textView.layoutManager?.usedRect(
+                    for: textView.textContainer ?? NSTextContainer()
+                ).height
+                ?? textView.bounds.height
+            let viewportHeight = clipView.bounds.height
+            if contentHeight > viewportHeight {
+                let documentHeight = max(contentHeight, viewportHeight)
+                let top = min(max(clipView.bounds.minY / documentHeight, 0), 1)
+                let bottom = min(
+                    max((clipView.bounds.minY + viewportHeight) / documentHeight, 0), 1)
+                let thumbTop = top * bounds.height
+                let thumbHeight = max((bottom - top) * bounds.height, 20)
+                EditorTheme.scrollbarSliderNS.setFill()
+                NSRect(
+                    x: bounds.minX, y: thumbTop,
+                    width: bounds.width, height: min(thumbHeight, bounds.height - thumbTop)
+                ).fill()
+            }
         }
     }
 

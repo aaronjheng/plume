@@ -36,15 +36,33 @@ public enum EditorTheme {
     nonisolated(unsafe) public static var codeBackgroundNS: NSColor = .textBackgroundColor
     /// Current-line highlight wash (the band behind the caret's line),
     /// following the pattern of Monaco's `editor.lineHighlightBackground`:
-    /// a barely-there translucent wash over the code background. The
-    /// default is ~5% labelColor; hosts install their own value.
-    nonisolated(unsafe) public static var lineHighlightBackgroundNS: NSColor =
-        .labelColor.withAlphaComponent(0.05)
-    /// Current-line highlight border (Monaco's `editor.lineHighlightBorder`).
-    /// Set the background above to clear and this token to a visible border
-    /// color to get a pure-border current-line highlight. The default is
-    /// the system separator color; hosts install their own value.
-    nonisolated(unsafe) public static var lineHighlightBorderNS: NSColor = .separatorColor
+    /// Monaco's default is NO fill (a transparent line with just the
+    /// border), so the default here is clear too; hosts install a wash if
+    /// they want one.
+    nonisolated(unsafe) public static var lineHighlightBackgroundNS: NSColor = .clear
+    /// Current-line highlight border (Monaco's `editor.lineHighlightBorder`):
+    /// Monaco's default themes use a barely-offset gray (#282828 on
+    /// #1E1E1E dark, #eeeeee on #ffffff light) — ~7% label over the
+    /// background. Hosts install their own value.
+    nonisolated(unsafe) public static var lineHighlightBorderNS: NSColor =
+        .labelColor.withAlphaComponent(0.07)
+    /// Overview-ruler slider thumb (Monaco's `scrollbarSlider.background`):
+    /// dark #797979 @ 40% / light #646464 @ 40%. Hosts install their own.
+    nonisolated(unsafe) public static var scrollbarSliderNS: NSColor = NSColor(
+        name: nil
+    ) { appearance in
+        let dark =
+            appearance.bestMatch(from: [
+                .darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua,
+                .accessibilityHighContrastVibrantDark,
+            ]) != nil
+        return NSColor(
+            calibratedWhite: dark ? 121.0 / 255 : 100.0 / 255, alpha: 0.4)
+    }
+    /// Overview-ruler border (Monaco's `editorOverviewRuler.border`):
+    /// 30% gray (#7f7f7f4d) in every appearance. Hosts install their own.
+    nonisolated(unsafe) public static var overviewRulerBorderNS: NSColor =
+        NSColor(calibratedWhite: 127.0 / 255, alpha: 0.3)
     /// Selection wash. Nil keeps the system selection color (Plume's
     /// historic behavior); hosts set it to tint selections Monaco-style
     /// (`editor.selectionBackground`). Set once at app launch.
@@ -93,8 +111,9 @@ public enum EditorTheme {
     nonisolated(unsafe) public static var lineField: CGFloat = 1
     nonisolated(unsafe) public static var lineFocusedField: CGFloat = 2
     /// Width of the current-line highlight border (`lineHighlightBorderNS`),
-    /// matching Monaco's 1px line-highlight border by default.
-    nonisolated(unsafe) public static var lineHighlightBorderWidth: CGFloat = 1
+    /// matching Monaco's 2px line-highlight border by default (1px only
+    /// for high-contrast themes there).
+    nonisolated(unsafe) public static var lineHighlightBorderWidth: CGFloat = 2
     /// Text line-height multiplier, applied through the paragraph style's
     /// `lineHeightMultiple` (1 = the font's natural leading; hosts pick a
     /// larger value for airier code lines, Monaco-style).

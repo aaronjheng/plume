@@ -85,8 +85,9 @@ public enum EditorFontBalancing {
             }
         }
         registeredFontURL = url
-        guard let descriptors = CTFontManagerCreateFontDescriptorsFromURL(
-            url as CFURL) as? [CTFontDescriptor], !descriptors.isEmpty
+        guard
+            let descriptors = CTFontManagerCreateFontDescriptorsFromURL(
+                url as CFURL) as? [CTFontDescriptor], !descriptors.isEmpty
         else {
             assertionFailure("EditorFontBalancing: derivation produced no descriptors")
             return
@@ -106,12 +107,15 @@ public enum EditorFontBalancing {
     public static func font(size: CGFloat, weight: NSFont.Weight) -> NSFont? {
         guard !weightDescriptors.isEmpty else { return nil }
         let target = Self.traitValue(of: weight)
-        guard let matchedDescriptor = weightDescriptors.first(where: { descriptor in
-            let traits = CTFontDescriptorCopyAttribute(descriptor, kCTFontTraitsAttribute)
-                as? [String: Any]
-            let descriptorWeight = traits?[kCTFontWeightTrait as String] as? CGFloat ?? 0
-            return abs(descriptorWeight - target) < 0.01
-        }) else { return nil }
+        guard
+            let matchedDescriptor = weightDescriptors.first(where: { descriptor in
+                let traits =
+                    CTFontDescriptorCopyAttribute(descriptor, kCTFontTraitsAttribute)
+                    as? [String: Any]
+                let descriptorWeight = traits?[kCTFontWeightTrait as String] as? CGFloat ?? 0
+                return abs(descriptorWeight - target) < 0.01
+            })
+        else { return nil }
         let font = CTFontCreateWithFontDescriptor(matchedDescriptor, size, nil) as NSFont
         // Guard against a silently-substituted font (wrong metrics).
         return font.familyName == baseFamilyName ? font : nil

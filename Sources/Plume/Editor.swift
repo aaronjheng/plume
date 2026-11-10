@@ -1151,6 +1151,7 @@ struct EditorRepresentable: NSViewRepresentable {
             coordinator?.reportContentHeight(textView)
             coordinator?.redrawGutter()
             coordinator?.applyScrollBeyond(textView)
+            coordinator?.refreshWrapReserve(textView)
         }
 
         let root = EditorRootView(
@@ -1382,9 +1383,9 @@ final class EditorRootView: NSView {
             gutter.bottomAnchor.constraint(equalTo: bottomAnchor),
             gutterWidthConstraint,
             scrollView.leadingAnchor.constraint(equalTo: gutter.trailingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ruler.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             ruler.trailingAnchor.constraint(equalTo: trailingAnchor),
             ruler.topAnchor.constraint(equalTo: topAnchor),
             ruler.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -2190,7 +2191,10 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         let borderWidth = EditorTheme.lineHighlightBorderWidth
         if borderWidth > 0 {
             EditorTheme.lineHighlightBorderNS.setStroke()
-            let border = NSBezierPath(rect: lineBandRect)
+            // Border-box like Monaco: the stroke lies INSIDE the band's
+            // total height (the 1.5 × fontSize box includes the border).
+            let border = NSBezierPath(
+                rect: lineBandRect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
             border.lineWidth = borderWidth
             border.stroke()
         }
@@ -3038,7 +3042,18 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             first = false
             index = NSMaxRange(fragmentGlyphs)
         }
-        return fullWidth(band)
+        let stretched = fullWidth(band)
+        // Monaco's highlight box is the line height (fontSize × 1.5,
+        // rounded): taller than the glyph box, centered on the line.
+        // Wrapped multi-fragment unions are already taller and stay.
+        let fontSize =
+            (textView as? EditorTextView)?.editorCoordinator?.parent.font.nsFont.pointSize
+            ?? (textView as? EditorTextView)?.font?.pointSize ?? 13
+        let boxHeight = (fontSize * 1.5).rounded()
+        guard boxHeight > stretched.height else { return stretched }
+        let centered = stretched.minY + (stretched.height - boxHeight) / 2
+        return NSRect(
+            x: stretched.minX, y: centered, width: stretched.width, height: boxHeight)
     }
 
     // MARK: Context menu
@@ -3341,6 +3356,8 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     var didDetectIndentation = false
     /// Last applied wrap mode (updateNSView diff).
     var lastWordWrap: EditorWordWrap?
+    /// The overview-ruler strip width last applied to the wrap reserve.
+    var lastWrapReserve: CGFloat = 0
     /// The indent unit typed by Tab and brace expansion: `tabSize`
     /// spaces, or one tab character.
     var indentUnit: String {
@@ -3406,16 +3423,27 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// lines run long and the scroll view pans horizontally (overlay
     /// scroller enabled for the pan feedback).
     func applyWordWrap(_ wrap: EditorWordWrap, to textView: NSTextView) {
-        guard wrap != lastWordWrap else { return }
+        let reserve: CGFloat = parent.showsOverviewRuler ? EditorOverviewRulerView.width : 0
+        guard wrap != lastWordWrap || reserve != lastWrapReserve else { return }
         lastWordWrap = wrap
+        lastWrapReserve = reserve
         let spaceWidth = spaceWidth(for: parent.font.nsFont)
         let containerWidth: CGFloat
         switch wrap {
-        case .on: containerWidth = 0
+        case .on:
+            // Reserve the overview-ruler strip on the right so wrapped
+            // text never runs under the transparent scrollbar; the line
+            // band extends beneath it instead. Before the view is sized
+            // (bounds 0) keep the auto-tracking path.
+            containerWidth =
+                parent.showsOverviewRuler && textView.bounds.width > 1
+                ? textView.bounds.width - Editor.textInset.width * 2
+                    - EditorOverviewRulerView.width
+                : 0
         case .off: containerWidth = .greatestFiniteMagnitude
         case .column(let columns): containerWidth = CGFloat(max(columns, 1)) * spaceWidth
         }
-        let tracksWidth = wrap == .on
+        let tracksWidth = wrap == .on && containerWidth == 0
         let horizontallyResizable = wrap != .on
         if let container = textView.textContainer {
             if container.widthTracksTextView != tracksWidth {
@@ -3439,6 +3467,26 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         textView.needsDisplay = true
         reportContentHeight(textView)
     }
+    /// Keeps the ruler strip reserved on the container's right edge as
+    /// the view resizes (`.on` wrap runs with a manual container width
+    /// while the ruler is shown). Called from the layout pass; the write
+    /// only invalidates paint and re-reports the height.
+    func refreshWrapReserve(_ textView: NSTextView?) {
+        guard let textView, parent.showsOverviewRuler, parent.wordWrap == .on,
+            textView.bounds.width > 1, let container = textView.textContainer
+        else { return }
+        let target =
+            textView.bounds.width - Editor.textInset.width * 2
+            - EditorOverviewRulerView.width
+        if abs(container.containerSize.width - target) > 0.5 {
+            container.containerSize = NSSize(
+                width: target, height: container.containerSize.height)
+            textView.needsLayout = true
+            textView.needsDisplay = true
+            reportContentHeight(textView)
+        }
+    }
+
     /// First-fill detection: the majority
     /// style of the document's leading whitespace wins; for spaces, the
     /// GCD of leading runs (clamped 1...8) is the unit.
