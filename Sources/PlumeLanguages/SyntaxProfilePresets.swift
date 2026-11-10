@@ -1,6 +1,7 @@
 import Plume
 import SwiftTreeSitter
 import TreeSitterBash
+import TreeSitterHTML
 import TreeSitterJSON
 import TreeSitterJavaScript
 import TreeSitterLua
@@ -35,6 +36,19 @@ extension SyntaxProfile {
         language: { tree_sitter_xml().map { Language($0) } },
         paint: { root, length, cursor, runs in
             SyntaxHighlight.paintXML(run: root, length: length, cursor: &cursor, runs: &runs)
+        },
+        commentStyle: .block(open: "<!--", close: "-->"),
+        brackets: SyntaxProfile.defaultBrackets + [SyntaxProfile.BracketPair(open: "<", close: ">")])
+
+    /// HTML: tag names keyword-colored, attribute names keys, values
+    /// strings, comments and the doctype dim, entities numbers. Block
+    /// `<!-- -->` comments; auto-pairs `< >` on top of the default set
+    /// (tags only ever open with `<`).
+    public static let html = SyntaxProfile(
+        id: "html",
+        language: { tree_sitter_html().map { Language($0) } },
+        paint: { root, length, cursor, runs in
+            SyntaxHighlight.paintHTML(run: root, length: length, cursor: &cursor, runs: &runs)
         },
         commentStyle: .block(open: "<!--", close: "-->"),
         brackets: SyntaxProfile.defaultBrackets + [SyntaxProfile.BracketPair(open: "<", close: ">")])

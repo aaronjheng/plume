@@ -211,6 +211,103 @@ public enum SyntaxHighlight {
         runs.append((range, color))
     }
 
+    /// HTML (Monaco's html tier): tag names keyword-colored, attribute
+    /// names key-colored, values strings, comments dim, entities numbers,
+    /// text content plain. `<script>`/`<style>` raw text stays plain (the
+    /// embedded JS/CSS would need injected grammars; Monaco colors them
+    /// via separate embedded parses).
+    public static func paintHTML(
+        run node: Node,
+        length: Int,
+        cursor: inout Int,
+        runs: inout [(NSRange, NSColor)]
+    ) {
+        guard let type = node.nodeType, !node.isMissing else { return }
+        switch type {
+        case "start_tag", "end_tag", "self_closing_tag", "erroneous_end_tag":
+            var namedTag = false
+            for index in 0..<node.childCount {
+                guard let child = node.child(at: index) else { continue }
+                switch child.nodeType {
+                case "tag_name", "erroneous_end_tag_name":
+                    if !namedTag {
+                        paintHTMLLeaf(
+                            child, color: NSColor(EditorTheme.syntaxKeyword),
+                            length: length, cursor: &cursor, runs: &runs)
+                        namedTag = true
+                    } else {
+                        paintHTML(
+                            run: child, length: length, cursor: &cursor, runs: &runs)
+                    }
+                case "attribute":
+                    paintHTML(run: child, length: length, cursor: &cursor, runs: &runs)
+                default:
+                    // `<`, `>`, `/`, `>` punctuation stays plain.
+                    paintHTMLLeaf(
+                        child, color: NSColor(EditorTheme.syntaxPlain),
+                        length: length, cursor: &cursor, runs: &runs)
+                }
+            }
+        case "attribute":
+            for index in 0..<node.childCount {
+                guard let child = node.child(at: index) else { continue }
+                switch child.nodeType {
+                case "attribute_name":
+                    paintHTMLLeaf(
+                        child, color: NSColor(EditorTheme.syntaxKey),
+                        length: length, cursor: &cursor, runs: &runs)
+                case "quoted_attribute_value", "attribute_value":
+                    paintHTMLLeaf(
+                        child, color: NSColor(EditorTheme.syntaxString),
+                        length: length, cursor: &cursor, runs: &runs)
+                default:
+                    paintHTML(
+                        run: child, length: length, cursor: &cursor, runs: &runs)
+                }
+            }
+        case "comment":
+            paintHTMLLeaf(
+                node, color: NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain),
+                length: length, cursor: &cursor, runs: &runs)
+        case "doctype":
+            paintHTMLLeaf(
+                node, color: NSColor(EditorTheme.syntaxComment ?? EditorTheme.syntaxPlain),
+                length: length, cursor: &cursor, runs: &runs)
+        case "entity":
+            paintHTMLLeaf(
+                node, color: NSColor(EditorTheme.syntaxNumber),
+                length: length, cursor: &cursor, runs: &runs)
+        case "text", "raw_text":
+            // Element text (and script/style raw text) stays default.
+            break
+        default:
+            if node.childCount == 0 {
+                if node.isNamed { break }
+                paintHTMLLeaf(
+                    node, color: NSColor(EditorTheme.syntaxPlain),
+                    length: length, cursor: &cursor, runs: &runs)
+            } else {
+                for index in 0..<node.childCount {
+                    guard let child = node.child(at: index) else { continue }
+                    paintHTML(run: child, length: length, cursor: &cursor, runs: &runs)
+                }
+            }
+        }
+    }
+
+    public static func paintHTMLLeaf(
+        _ node: Node,
+        color: NSColor,
+        length: Int,
+        cursor: inout Int,
+        runs: inout [(NSRange, NSColor)]
+    ) {
+        let range = node.range.clamped(to: 0..<length)
+        guard range.length > 0 else { return }
+        cursor = range.location + range.length
+        runs.append((range, color))
+    }
+
     /// Anonymous JavaScript tokens that read as keywords: statements,
     /// declarations, literals, the arrow. Anything not on the list falls
     /// through to the editor's default text color, so being out of sync

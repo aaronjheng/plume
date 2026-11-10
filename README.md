@@ -14,7 +14,7 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
 - **Syntax profiles**: `SyntaxProfile` pairs a tree-sitter grammar with its
   paint walk. The core package ships none; the `PlumeLanguages` product
   layers preset profiles for the common embedded languages (json, xml,
-  javascript, bash, lua) on top, and hosts define further languages on
+  html, javascript, bash, lua) on top, and hosts define further languages on
   their side.
 - **Injected host integration**: chrome tokens (`EditorTheme`, set at app
   launch), annotation washes, an opaque completion engine, and a formatting
@@ -116,7 +116,7 @@ core's walks:
 ```swift
 import Plume
 
-// Define a syntax profile over your grammar (presets cover json, xml,
+// Define a syntax profile over your grammar (presets cover json, xml, html,
 // javascript, bash, lua; other languages are host-side).
 extension SyntaxProfile {
     static let toml = SyntaxProfile(
