@@ -291,8 +291,52 @@ final class EditorGutterView: NSView, NSViewToolTipOwner {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(ns.substring(with: lineRange), forType: .string)
+            return
         }
+        // Drag-select (Monaco: dragging across line numbers selects whole
+        // lines); the anchor is this line until another mousedown.
+        gutterDragAnchor = lineRange
+        isDraggingLines = true
     }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDraggingLines, gutterDragAnchor != nil,
+            let textView, let layoutManager = textView.layoutManager,
+            let container = textView.textContainer
+        else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let textPoint = textView.convert(CGPoint(x: fragmentProbeX, y: point.y), from: self)
+        let glyph = layoutManager.glyphIndex(for: textPoint, in: container)
+        var fragmentGlyphs = NSRange()
+        _ = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &fragmentGlyphs)
+        let charRange = layoutManager.characterRange(forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+        let ns = textView.string as NSString
+        guard ns.length > 0 else { return }
+        guard let anchor = gutterDragAnchor else { return }
+        let lineRange = ns.lineRange(
+            for: NSRange(location: min(charRange.location, ns.length - 1), length: 0))
+        let from = min(anchor.location, lineRange.location)
+        let to = max(NSMaxRange(anchor), NSMaxRange(lineRange))
+        var span = NSRange(location: from, length: to - from)
+        // Cover the whole closer line (its trailing newline included so
+        // the drag reads as solid blocks, Monaco-style).
+        if NSMaxRange(span) < ns.length,
+            ns.character(at: NSMaxRange(span) - 1) == UInt16(UnicodeScalar("\n").value)
+        {
+            span.length += 1
+        }
+        textView.setSelectedRange(span)
+        textView.scrollRangeToVisible(lineRange)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDraggingLines = false
+        super.mouseUp(with: event)
+    }
+
+    /// The line selection a gutter drag started from (nil when idle).
+    private var gutterDragAnchor: NSRange?
+    private var isDraggingLines = false
 
     /// A small colored dot left of the number, marking a line that carries
     /// a diagnostic (host marker or syntax error); the color follows the

@@ -68,6 +68,10 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   keep context lines visible), `fontLigatures`, and
   `guides.bracketPairs` (vertical guides spanning pairs, tinted by
   depth).
+- **Editing assists** (more Monaco parity): ⌃K delete-to-line-end,
+  gutter drag selects whole lines, ⌘⌥Enter / ⌘⌥⇧Enter replace
+  one/all while the find bar is up, ⌃-wheel editor zoom
+  (`mouseWheelZoom`), and middle-click paste from the find clipboard.
 - **Host API**: `onSelectionChange` (line/column/length per caret
   move), `formatSelectionHandler` (⌥⇧F with a selection formats the
   selection only), `onFontScaleChange` (observe editor-local zoom),

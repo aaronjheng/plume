@@ -1440,6 +1440,25 @@ final class EditorScrollView: NSScrollView {
         super.layout()
         onLayout?()
     }
+
+    /// ⌃+wheel zooms the editor's font scale (Monaco
+    /// `mouseWheelZoom`); plain wheel scrolls as usual.
+    override func scrollWheel(with event: NSEvent) {
+        if event.modifierFlags.intersection([.command, .control]) == .control,
+            let textView = (documentView as? EditorTextView),
+            textView.window?.firstResponder === textView,
+            let coordinator = textView.editorCoordinator
+        {
+            let delta = event.scrollingDeltaY
+            if delta > 0.01 {
+                coordinator.zoom(in: textView)
+            } else if delta < -0.01 {
+                coordinator.zoomOut(in: textView)
+            }
+            return
+        }
+        super.scrollWheel(with: event)
+    }
 }
 
 /// The editor's clip view. AppKit's NSClipView overrides
@@ -1829,6 +1848,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             editorCoordinator.deleteToLogicalLineStart(in: self)
             return
         }
+        // ⌃K: delete to the line's end (Monaco `deleteAllRight`).
+        if modifiers == [.control], event.keyCode == 40,
+            window?.firstResponder === self, isEditable, let editorCoordinator
+        {
+            editorCoordinator.deleteToLineEnd(in: self)
+            return
+        }
         // Right arrow: jump past a closing bracket/quote when the caret
         // sits right before it, so the paired character does not trap the
         // caret between the pair.
@@ -1976,6 +2002,20 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.jumpToMatchingBracket(in: self)
             return true
         }
+        // ⌘⌥Enter: replace the current match (Monaco's replace-one key).
+        if modifiers == [.command, .option], event.keyCode == 36,
+            coordinator.parent.find.visible
+        {
+            coordinator.performFindAction(.replaceCurrent, in: self)
+            return true
+        }
+        // ⌘⌥⇧Enter: replace all (Monaco's replace-all key).
+        if modifiers == [.command, .option, .shift], event.keyCode == 36,
+            coordinator.parent.find.visible
+        {
+            coordinator.performFindAction(.replaceAll, in: self)
+            return true
+        }
         if modifiers == [.command], event.charactersIgnoringModifiers == "d" {
             coordinator.duplicateLines(in: self)
             return true
@@ -2068,6 +2108,26 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             }
         }
         super.mouseDown(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        // Middle button pastes at the clicked position (X11/terminal
+        // muscle memory); any other non-primary button falls through.
+        guard event.type == .otherMouseDown, event.buttonNumber == 2,
+            isEditable, let text = NSPasteboard(name: .findPboard).string(forType: .string),
+            !text.isEmpty,
+            let layoutManager, let container = textContainer
+        else {
+            super.otherMouseDown(with: event)
+            return
+        }
+        let index = layoutManager.characterIndex(
+            for: convert(event.locationInWindow, from: nil), in: container,
+            fractionOfDistanceBetweenInsertionPoints: nil)
+        let length = (string as NSString).length
+        let location = min(index, length)
+        setSelectedRange(NSRange(location: location, length: 0))
+        insertText(text, replacementRange: NSRange(location: location, length: 0))
     }
 
     override func viewDidMoveToWindow() {
@@ -3077,6 +3137,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         menu.addItem(.separator())
         item("Duplicate Lines", "d", [.command], #selector(menuDuplicateLines), editable)
         item("Delete Lines", "k", [.command, .shift], #selector(menuDeleteLines), editable)
+        item("Delete to Line End", "k", [.control], #selector(menuDeleteToLineEnd), editable)
         let upKey = String(UnicodeScalar(NSUpArrowFunctionKey) ?? "?")
         let downKey = String(UnicodeScalar(NSDownArrowFunctionKey) ?? "?")
         item("Move Line Up", upKey, [.control, .command], #selector(menuMoveLinesUp), editable)
@@ -3133,6 +3194,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     @objc private func menuToggleComment() { _ = editorCoordinator?.toggleComment(self) }
     @objc private func menuDuplicateLines() { editorCoordinator?.duplicateLines(in: self) }
     @objc private func menuDeleteLines() { editorCoordinator?.deleteLines(in: self) }
+    @objc private func menuDeleteToLineEnd() { editorCoordinator?.deleteToLineEnd(in: self) }
     @objc private func menuMoveLinesUp() { editorCoordinator?.moveLines(in: self, up: true) }
     @objc private func menuMoveLinesDown() { editorCoordinator?.moveLines(in: self, up: false) }
     @objc private func menuUppercaseLines() { editorCoordinator?.uppercaseLines(in: self) }
@@ -3637,6 +3699,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     func textDidChange(_ notification: Notification) {
         guard let textView = notification.object as? NSTextView else { return }
         lastCommitTime = Date()
+        reportStats(in: textView)
         // Non-ASCII COMMIT (CJK IME): glyphs generated during the IME's
         // edit window come out zero-advance (the run squeezed into a
         // sliver, drawing nothing). After the composition is fully torn

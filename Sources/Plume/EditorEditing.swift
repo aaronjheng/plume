@@ -409,6 +409,33 @@ extension EditorCoordinator {
     /// ⌘⌫: deletes from the logical line's start to the caret; at the line
     /// start it deletes the preceding newline (joining the line above).
     /// With a selection the platform's delete-selection applies instead.
+    /// ⌃K (Monaco `deleteAllRight`): delete from the caret to the line's
+    /// content end (the newline stays); with a selection, delete the
+    /// whole selection (same as Monaco's behavior for a non-empty
+    /// selection).
+    func deleteToLineEnd(in textView: NSTextView) {
+        guard textView.isEditable, !textView.hasMarkedText() else { return }
+        let selection = textView.selectedRange()
+        if selection.length > 0 {
+            replace(in: textView, range: selection, with: "", caret: selection.location)
+            return
+        }
+        let ns = textView.string as NSString
+        let caret = selection.location
+        let lineRange = ns.lineRange(for: NSRange(location: caret, length: 0))
+        var end = NSMaxRange(lineRange)
+        // Content only: stop before the newline.
+        if end > lineRange.location,
+            codeEditorChar(ns, end - 1) == "\n"
+        {
+            end -= 1
+        }
+        guard end > caret else { return }
+        replace(
+            in: textView, range: NSRange(location: caret, length: end - caret),
+            with: "", caret: caret)
+    }
+
     func deleteToLogicalLineStart(in textView: NSTextView) {
         guard textView.isEditable, textView.selectedRange().length == 0,
             !textView.hasMarkedText()
