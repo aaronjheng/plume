@@ -3397,7 +3397,13 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
             column: caret - lineStart + 1)
         guard stats != lastStats else { return }
         lastStats = stats
-        onStatsChange(stats)
+        // Publish on the next runloop turn: onStatsChange mutates host
+        // SwiftUI state, and reportStats runs inside view-update
+        // transactions (makeNSView's initial fill, updateNSView passes)
+        // where a synchronous publish is swallowed ("will not be
+        // displayed") - hosts would see no stats until the first
+        // selection change or edit that moved the caret.
+        DispatchQueue.main.async { onStatsChange(stats) }
     }
     /// Last processed find/goto actions so synchronous SwiftUI-state
     /// clears (dropped inside update transactions) do not re-trigger.
