@@ -402,6 +402,7 @@ extension EditorCoordinator {
             anchor = caret
         }
         guard let anchor, let match = bracketMatch(in: text, at: anchor) else { return }
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(NSRange(location: match, length: 1))
         reveal(NSRange(location: match, length: 1), in: textView)
     }
@@ -519,6 +520,7 @@ extension EditorCoordinator {
             let maxColumn = max(contentEnd - location, 0)
             location = min(location + min(max(column, 1) - 1, maxColumn), length)
         }
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(NSRange(location: location, length: 0))
         reveal(NSRange(location: location, length: 0), in: textView)
     }
@@ -612,6 +614,7 @@ extension EditorCoordinator {
         else { return }
         let clamped = target.clampedToString(length)
         guard clamped.length > 0 else { return }
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(clamped)
         reveal(clamped, in: textView)
     }
@@ -631,6 +634,7 @@ extension EditorCoordinator {
         else { return }
         let targetClamped = target.clampedToString(length)
         guard targetClamped.length > 0 else { return }
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(targetClamped)
         reveal(targetClamped, in: textView)
     }
@@ -652,6 +656,7 @@ extension EditorCoordinator {
                 entries.last(where: { $0.range.location < caret })
                 ?? entries.last
             guard let target else { return }
+            pushNavigationOrigin(in: textView)
             textView.setSelectedRange(target.range)
             reveal(target.range, in: textView)
         } else {
@@ -659,6 +664,7 @@ extension EditorCoordinator {
                 entries.first(where: { NSMaxRange($0.range) > caret })
                 ?? entries.first
             guard let target else { return }
+            pushNavigationOrigin(in: textView)
             textView.setSelectedRange(target.range)
             reveal(target.range, in: textView)
         }
@@ -732,6 +738,7 @@ extension EditorCoordinator {
             }
         }
         guard let next else { return }
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(next)
         reveal(next, in: textView)
     }
@@ -1183,5 +1190,51 @@ extension EditorCoordinator {
         }
         if formatPastedString(pasted, in: textView) { return }
         textView.pasteAsPlainText(nil)
+    }
+}
+
+// MARK: - Navigation history (⌃- / ⌃⇧-)
+
+extension EditorCoordinator {
+    /// Whether a jump target waits at the bottom of the back stack
+    /// (drives the Go Back context-menu item).
+    var canNavigateBack: Bool { !navigationBackStack.isEmpty }
+    /// Whether forwards navigation has anything to restore.
+    var canNavigateForward: Bool { !navigationForwardStack.isEmpty }
+
+    /// Records the live selection as the origin of an upcoming jump, so
+    /// the back stack can return to it. Jump sites call this right before
+    /// moving the selection; back-to-back identical origins are dropped,
+    /// and every new origin invalidates the forward stack (like a fresh
+    /// browser history entry).
+    func pushNavigationOrigin(in textView: NSTextView) {
+        let here = textView.selectedRange()
+        guard navigationBackStack.last != here else { return }
+        navigationBackStack.append(here)
+        if navigationBackStack.count > 50 { navigationBackStack.removeFirst() }
+        navigationForwardStack.removeAll()
+    }
+
+    /// ⌃- (Monaco `navigateBack`): jump back to where the last
+    /// programmatic jump started; repeat presses walk one jump past each.
+    /// Selection-only: works on read-only editors.
+    func navigateBack(in textView: NSTextView) {
+        guard let target = navigationBackStack.popLast() else { return }
+        let length = (textView.string as NSString).length
+        navigationForwardStack.append(textView.selectedRange())
+        let clamped = target.clampedToString(length)
+        textView.setSelectedRange(clamped)
+        reveal(clamped, in: textView)
+    }
+
+    /// ⌃⇧- (Monaco `navigateForward`): jump forward again after one or
+    /// more backs. Selection-only: works on read-only editors.
+    func navigateForward(in textView: NSTextView) {
+        guard let target = navigationForwardStack.popLast() else { return }
+        let length = (textView.string as NSString).length
+        navigationBackStack.append(textView.selectedRange())
+        let clamped = target.clampedToString(length)
+        textView.setSelectedRange(clamped)
+        reveal(clamped, in: textView)
     }
 }

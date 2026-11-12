@@ -187,13 +187,13 @@ struct EditorFindBar: View {
     private var findField: some View {
         field(text: $query, prompt: "Find", focused: findFocused, isError: isInvalidRegex) {
             HStack(spacing: 2) {
-                hoverButton("Aa", isActive: caseSensitive, help: "Match Case") {
+                hoverButton("Aa", isActive: caseSensitive, help: "Match Case (⌥⌘C)") {
                     caseSensitive.toggle()
                 }
-                hoverButton("ab", isActive: wholeWord, help: "Match Whole Word") {
+                hoverButton("ab", isActive: wholeWord, help: "Match Whole Word (⌥⌘W)") {
                     wholeWord.toggle()
                 }
-                hoverButton(".*", isActive: isRegex, help: "Use Regular Expression ($1 in replacement)") {
+                hoverButton(".*", isActive: isRegex, help: "Use Regular Expression (⌥⌘R, $1 in replacement)") {
                     isRegex.toggle()
                 }
             }
@@ -201,6 +201,26 @@ struct EditorFindBar: View {
         .focused($findFocused)
         .onSubmit(onNext)
         .onExitCommand { onClose() }
+        // ⌥⌘C/⌥⌘R/⌥⌘W (Monaco toggleFindCaseSensitive/Regex/WholeWord) and
+        // ⇧Enter for the previous match apply to the whole widget, so
+        // they live on both fields.
+        .onKeyPress(.return, phases: .down) { (press: KeyPress) in
+            if press.modifiers == [.shift] {
+                onPrevious()
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(phases: .down) { (press: KeyPress) in
+            guard press.modifiers == [.command, .option] else { return .ignored }
+            switch press.characters.lowercased() {
+            case "c": caseSensitive.toggle()
+            case "r": isRegex.toggle()
+            case "w": wholeWord.toggle()
+            default: return .ignored
+            }
+            return .handled
+        }
         .onKeyPress(.upArrow) {
             stepHistory(
                 history: queryHistory, index: $queryHistoryIndex,
@@ -233,6 +253,23 @@ struct EditorFindBar: View {
         .focused($replaceFocused)
         .onSubmit(onReplace)
         .onExitCommand { onClose() }
+        .onKeyPress(.return, phases: .down) { (press: KeyPress) in
+            if press.modifiers == [.shift] {
+                onPrevious()
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(phases: .down) { (press: KeyPress) in
+            guard press.modifiers == [.command, .option] else { return .ignored }
+            switch press.characters.lowercased() {
+            case "c": caseSensitive.toggle()
+            case "r": isRegex.toggle()
+            case "w": wholeWord.toggle()
+            default: return .ignored
+            }
+            return .handled
+        }
         .onKeyPress(.upArrow) {
             stepHistory(
                 history: replacementHistory, index: $replaceHistoryIndex,

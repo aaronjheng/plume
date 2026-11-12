@@ -42,7 +42,7 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   (`.on`/`.off`/`.column(n)`), and go-to-line accepting `line:column`.
 - **Navigation**: F8/Shift+F8 diagnostic jumps, ⌃⌘D/⌃⌘⇧D word-occurrence
   selection (⌘D keeps duplicate-lines), editor-local zoom
-  (⌃= / ⌃- / ⌃0, starting from `initialFontScale`), toggle wrap (⌥Z),
+  (⌃= / ⌃⌥- / ⌃0, starting from `initialFontScale`), toggle wrap (⌥Z),
   transpose (⌃T), and auto-outdent for typing `}`/`]`/`)`/`>`.
 - **Rendering options**: `rulers`, `renderLineHighlight`
   (`.none`/`.gutter`/`.line`/`.all` + only-when-focus), `renderWhitespace`
@@ -158,6 +158,10 @@ final class MySuggestBridge: EditorSuggestControlling {
     func handleCommand(_ selector: Selector) -> Bool { engine.handleCommand(selector) }
     var isVisible: Bool { engine.isVisible }
     func hide() { engine.hide() }
+    func triggerSuggest(in textView: NSTextView) -> Bool {  // ⌥⎋
+        engine.showSuggestions(at: textView)
+        return true
+    }
 }
 ```
 
@@ -202,6 +206,8 @@ live in read-only editors; the editing ones need editability.
 | ↑ / ↓ | Recall query history (find and replace fields) |
 | Enter | Next match (find field) / replace current (replace field) |
 | Esc | Close the bar |
+| ⇧Enter | Previous match (same effect as ⌘⇧G, in either field) |
+| ⌥⌘C / ⌥⌘R / ⌥⌘W | Toggle match case / regex / whole word (anywhere in the bar) |
 
 **Go to & navigation**
 
@@ -216,6 +222,8 @@ live in read-only editors; the editing ones need editability.
 | ⌃⌘D / ⌃⌘⇧D | Select next / previous occurrence of the word or selection |
 | ⌃⇧⌘→ / ⌃⇧⌘← | Smart select: expand / shrink across the tree-sitter node ancestry |
 | ⌘⇧\ | Jump to the matching bracket |
+| ⌃- / ⌃⇧- | Jump back / forward through programmatic jumps (definition, diagnostics, bracket, go-to-line) |
+| ⌥⎋ | Manually trigger completions (hosts bridge `triggerSuggest`) |
 
 **Lines & editing**
 
@@ -250,7 +258,7 @@ live in read-only editors; the editing ones need editability.
 
 | Shortcut | Action |
 |---|---|
-| ⌃= / ⌃- / ⌃0 | Editor-local zoom in / out / reset (⌃+wheel zooms too) |
+| ⌃= / ⌃⌥- / ⌃0 | Editor-local zoom in / out / reset (⌃+wheel zooms too) |
 | ⌥Z | Toggle word wrap |
 
 Mouse extras: middle-click pastes the find clipboard at the clicked

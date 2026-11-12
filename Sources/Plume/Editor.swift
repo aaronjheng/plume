@@ -381,7 +381,7 @@ public struct Editor: View {
     /// (800ms idle). Off keeps manual `⌥⇧F` only.
     var formatOnType: Bool = false
     /// Starting font scale for the editor-local zoom (Monaco's
-    /// `editorZoom`). 1 is the `font` size itself; `⌃=`/`⌃-` adjust
+    /// `editorZoom`). 1 is the `font` size itself; `⌃=`/`⌃⌥-` adjust
     /// the live scale afterwards. Host changes after creation do not
     /// reset the live zoom.
     var initialFontScale: CGFloat = 1
@@ -954,6 +954,15 @@ public protocol EditorSuggestControlling: AnyObject {
     func handleCommand(_ selector: Selector) -> Bool
     var isVisible: Bool { get }
     func hide()
+    /// ⌥⎋ (Monaco `triggerSuggest`): the host opens its completion popup
+    /// at the caret. Returns true when a popup was shown. Hosts without a
+    /// completion UI need not implement it - the default returns false
+    /// and ⌥⎋ falls back to AppKit word completion.
+    func triggerSuggest(in textView: NSTextView) -> Bool
+}
+
+extension EditorSuggestControlling {
+    public func triggerSuggest(in textView: NSTextView) -> Bool { false }
 }
 
 struct EditorRepresentable: NSViewRepresentable {
@@ -1793,23 +1802,24 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             editorCoordinator.toggleWordWrap(in: self)
             return
         }
-        // ⌃= / ⌃- / ⌃0: zoom the editor-local font scale (Monaco `editorZoom`).
-        // Ctrl (not ⌘) so app-level window magnification keeps ⌘+/-.
+        // ⌃= / ⌃⌥- / ⌃0: zoom the editor-local font scale (Monaco `editorZoom`).
+        // Zoom-out moved off ⌃- when navigation took it (⌃- = Go Back,
+        // VS Code). Ctrl (not ⌘) so app-level window magnification keeps ⌘+/-.
         // Selection-only: zooms read-only editors too.
-        if window?.firstResponder === self, let editorCoordinator,
-            modifiers == [.control]
-        {
+        if window?.firstResponder === self, let editorCoordinator {
             let chars = event.charactersIgnoringModifiers?.lowercased()
-            if event.keyCode == 24 || chars == "=" || chars == "+" {
-                editorCoordinator.zoom(in: self)
-                return
+            if modifiers == [.control] {
+                if event.keyCode == 24 || chars == "=" || chars == "+" {
+                    editorCoordinator.zoom(in: self)
+                    return
+                }
+                if event.keyCode == 29 || chars == "0" {
+                    editorCoordinator.zoomReset(in: self)
+                    return
+                }
             }
-            if event.keyCode == 27 || chars == "-" {
+            if modifiers == [.control, .option], event.keyCode == 27 || chars == "-" {
                 editorCoordinator.zoomOut(in: self)
-                return
-            }
-            if event.keyCode == 29 || chars == "0" {
-                editorCoordinator.zoomReset(in: self)
                 return
             }
         }
@@ -1882,6 +1892,19 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     // (typing, paste, IME commit, drops) funnels through insertText.
     // Each edit attempt on a read-only editor surfaces the host's notice
     // instead of dying silently.
+    /// ⌥⎋ / F5: the host's explicit completion trigger (Monaco
+    /// `triggerSuggest`). The engine decides whether a popup opens;
+    /// without one (or a read-only editor) the stock AppKit word
+    /// completion stands in.
+    override func complete(_ sender: Any?) {
+        if isEditable, let suggest = editorCoordinator?.suggest,
+            suggest.triggerSuggest(in: self)
+        {
+            return
+        }
+        super.complete(sender)
+    }
+
     override func deleteBackward(_ sender: Any?) {
         guard isEditable else {
             editorCoordinator?.notifyReadOnlyAttempt()
@@ -1994,6 +2017,18 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             event.charactersIgnoringModifiers?.lowercased() == "d"
         {
             coordinator.selectPreviousMatch(in: self)
+            return true
+        }
+        // ⌃- / ⌃⇧-: navigation back/forward through programmatic jumps
+        // (Monaco navigateBack/navigateForward). Selection-only.
+        if event.keyCode == 27 || event.keyCode == 78,
+            modifiers == [.control] || modifiers == [.control, .shift]
+        {
+            if modifiers == [.control] {
+                coordinator.navigateBack(in: self)
+            } else {
+                coordinator.navigateForward(in: self)
+            }
             return true
         }
         // ⌘L: select the current line (Monaco expandLineSelection);
@@ -3215,11 +3250,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         item("Go to Next Diagnostic", "", [], #selector(menuNextDiagnostic), !coordinator.diagnosticEntries.isEmpty)
         item("Go to Previous Diagnostic", "", [], #selector(menuPreviousDiagnostic), !coordinator.diagnosticEntries.isEmpty)
         item("Zoom In", "=", [.control], #selector(menuZoomIn), true)
-        item("Zoom Out", "-", [.control], #selector(menuZoomOut), true)
+        item("Zoom Out", "-", [.option, .control], #selector(menuZoomOut), true)
         item("Zoom to Actual Size", "0", [.control], #selector(menuZoomReset), true)
         item("Toggle Word Wrap", "z", [.option], #selector(menuToggleWordWrap), true)
         item("Transpose Characters", "t", [.control], #selector(menuTransposeCharacters), editable)
         item("Go to Definition", "", [], #selector(menuGoToDefinition), coordinator.parent.definitionProvider != nil)
+        item("Go Back", "-", [.control], #selector(menuNavigateBack), coordinator.canNavigateBack)
+        item("Go Forward", "-", [.control, .shift], #selector(menuNavigateForward), coordinator.canNavigateForward)
         item("Document Symbols", "o", [.control, .shift], #selector(menuOutline), true)
         item("Signature Help", " ", [.control, .shift], #selector(menuSignature), coordinator.parent.signatureProvider != nil)
         if !coordinator.parent.actions.isEmpty {
@@ -3275,6 +3312,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     @objc private func menuToggleWordWrap() { editorCoordinator?.toggleWordWrap(in: self) }
     @objc private func menuTransposeCharacters() { editorCoordinator?.transposeCharacters(in: self) }
     @objc private func menuGoToDefinition() { editorCoordinator?.goToDefinition(in: self) }
+    @objc private func menuNavigateBack() { editorCoordinator?.navigateBack(in: self) }
+    @objc private func menuNavigateForward() { editorCoordinator?.navigateForward(in: self) }
     @objc private func menuOutline() { editorCoordinator?.requestDocumentSymbols(in: self) }
     @objc private func menuSignature() { editorCoordinator?.signatureHelp.showExplicitly(in: self) }
 
@@ -3464,6 +3503,11 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     /// Last processed find/goto actions so synchronous SwiftUI-state
     /// clears (dropped inside update transactions) do not re-trigger.
     fileprivate var lastProcessedFindAction: EditorFindAction?
+    /// Navigation history for ⌃-/⌃⇧- (Monaco `navigateBack`/`navigateForward`):
+    /// selections captured before a programmatic jump, so the editor can
+    /// walk through the jumps it made. Selection-only navigations.
+    var navigationBackStack: [NSRange] = []
+    var navigationForwardStack: [NSRange] = []
     /// The host markers currently rendered (diffed in updateNSView so a
     /// new array re-runs the squiggle pass).
     var hostMarkers: [EditorMarker] = []
@@ -3730,6 +3774,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
     func goToOutlineRange(_ range: NSRange, in textView: NSTextView) {
         let length = (textView.string as NSString).length
         let clamped = range.clamped(to: length) ?? NSRange(location: min(range.location, length), length: 0)
+        pushNavigationOrigin(in: textView)
         textView.setSelectedRange(clamped)
         reveal(clamped, in: textView)
     }
