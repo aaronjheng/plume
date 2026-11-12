@@ -21,8 +21,10 @@ indentation/wrapping - built once, consumed by Canoe (API client) and Runlet
   handler - a host without any of them simply passes nothing.
 - **Editing assists**: enter-line indent carry, Tab/Shift-Tab and ⌘]/⌘[
   block indent, per-language bracket/quote auto-pairing (`SyntaxProfile`
-  brackets + `autoClosing`/`autoSurround`) with skip-over, per-profile
-  comment toggling, duplicate/delete/copy/move line, upper/lowercase, sort
+  brackets + `autoClosing`/`autoSurround`; Backspace deletes a matched
+  empty pair) with skip-over, per-profile comment toggling (⌘/) and
+  block-comment toggling (⇧⌥A), duplicate/delete/copy/move line,
+  upper/lowercase, sort
   lines, join lines, trim trailing whitespace, read-only selectable mode,
   placeholders, auto-grow and fill-container sizing.
 - **Diagnostics**: host-injected
@@ -129,6 +131,11 @@ extension SyntaxProfile {
 }
 ```
 
+A profile can also carry a block-comment pair so ⇧⌥A (`toggleExplicitBlockComment`)
+wraps the selection - supply `blockComment: SyntaxProfile.BlockComment(open: "/*", close: "*/")`
+atop a line `commentStyle`. Without it, ⇧⌥A reuses a `.block` `commentStyle`
+when present and is a no-op otherwise (JSON, bash).
+
 ### Composing a suggest engine
 
 The suggest subsystem is host-bridged: implement `EditorSuggestControlling`
@@ -221,9 +228,14 @@ live in read-only editors; the editing ones need editability.
 | ⌃K | Delete to line end |
 | ⌘⌫ | Delete to the logical line's start |
 | ⌘/ | Toggle line comment |
+| ⇧⌥A | Toggle block comment (profile's `blockComment`, else a `.block` style) |
 | Tab / ⇧Tab | Block indent / outdent (⌘] / ⌘[ work too) |
 | ⌃T | Transpose characters |
 | → | Hop past a closing bracket/quote the caret sits before |
+| Backspace | Between an auto-paired empty pair, deletes both characters |
+| ⌘Enter / ⇧⌘Enter | Insert empty line below / above (indent carried) |
+| ⌘L | Select the current line (repeat presses grow one line down) |
+| ⌘C / ⌘X | With an empty selection, copy / cut the current line |
 | Esc | Dismiss completions, then signature help, then the find bar |
 
 **Formatting**

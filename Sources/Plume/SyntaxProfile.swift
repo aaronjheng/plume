@@ -63,6 +63,19 @@ public struct SyntaxProfile: Equatable, Sendable {
         }
     }
 
+    /// The block-comment pair for ⇧⌥A (Monaco `blockComment`): for
+    /// languages whose primary `commentStyle` is a line comment. Ignored
+    /// when `commentStyle` is itself `.block` (⇧⌥A routes there). nil with
+    /// a line `commentStyle` disables the key.
+    public struct BlockComment: Equatable, Sendable {
+        public let open: String
+        public let close: String
+        public init(open: String, close: String) {
+            self.open = open
+            self.close = close
+        }
+    }
+
     /// How ⌘/ comments the language.
     public enum CommentStyle: Equatable, Sendable {
         /// The grammar has no comments (JSON): the key falls through.
@@ -83,6 +96,8 @@ public struct SyntaxProfile: Equatable, Sendable {
     /// and the document's UTF-16 length; must append runs in order.
     public let paint: @Sendable (_ root: Node, _ length: Int, _ cursor: inout Int, _ runs: inout [(NSRange, NSColor)]) -> Void
     public let commentStyle: CommentStyle
+    /// Block-comment pair for ⇧⌥A; see `BlockComment`.
+    public let blockComment: BlockComment?
     /// Per-language auto-pairs consulted by smart insertion (typing an
     /// opener inserts/skip-over wraps the selection). `{` is deliberately
     /// absent from the default set: in an API client every brace is either
@@ -125,7 +140,8 @@ public struct SyntaxProfile: Equatable, Sendable {
         autoClosing: AutoClosingMode = .languageDefined,
         autoSurround: AutoSurroundMode = .languageDefined,
         onEnterRules: [OnEnterRule] = [],
-        continueLineComments: Bool = false
+        continueLineComments: Bool = false,
+        blockComment: BlockComment? = nil
     ) {
         self.id = id
         self.language = language
@@ -136,6 +152,7 @@ public struct SyntaxProfile: Equatable, Sendable {
         self.autoSurround = autoSurround
         self.onEnterRules = onEnterRules
         self.continueLineComments = continueLineComments
+        self.blockComment = blockComment
     }
 
     /// The zero-syntax profile: no grammar, no paint, no comments. The

@@ -31,13 +31,111 @@ extension EditorCoordinator {
         guard textView.isEditable, !textView.hasMarkedText(),
             let selected = selectedBlock(textView.string as NSString, selection: textView.selectedRange)
         else { return }
-        var range = NSRange(location: selected.range.location, length: selected.range.length + 1)
-        if NSMaxRange(range) > (textView.string as NSString).length {
-            // Last line: eat the preceding newline instead.
-            range = NSRange(location: selected.range.location - 1, length: selected.range.length + 1)
-        }
-        guard range.location >= 0 else { return }
+        let range = fullLineRange(in: textView.string as NSString, block: selected.range)
         replace(in: textView, range: range, with: "", caret: range.location)
+    }
+
+    /// The line block's range extended over its trailing newline (or, at
+    /// end of document without one, the preceding newline) - the shape
+    /// ⌘⇧K / copy / cut share so a whole physical line moves as a unit.
+    private func fullLineRange(in text: NSString, block: NSRange) -> NSRange {
+        let extended = NSRange(location: block.location, length: block.length + 1)
+        if NSMaxRange(extended) <= text.length { return extended }
+        if block.location > 0 {
+            return NSRange(location: block.location - 1, length: block.length + 1)
+        }
+        return block
+    }
+
+    /// ⌘C with an empty selection (Monaco `clipboardCopyAction`): writes
+    /// the current line (including its trailing newline, when it has
+    /// one) to the pasteboard without touching the selection. At end of
+    /// document without a trailing newline the content alone is copied -
+    /// no leading newline sneaks in. Selection-only: the empty-selection
+    /// case is the only one intercepted.
+    func copyLine(in textView: NSTextView) -> Bool {
+        let text = textView.string as NSString
+        guard let selected = selectedBlock(text, selection: textView.selectedRange())
+        else { return false }
+        let content = selected.range
+        let extended = NSRange(location: content.location, length: content.length + 1)
+        let range = NSMaxRange(extended) <= text.length ? extended : content
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setString(text.substring(with: range), forType: .string)
+    }
+
+    /// ⌘X with an empty selection (Monaco `clipboardCutAction`): cuts the
+    /// current line (including the trailing newline) as one unit.
+    func cutLine(in textView: NSTextView) -> Bool {
+        guard textView.isEditable, !textView.hasMarkedText() else { return false }
+        let text = textView.string as NSString
+        guard let selected = selectedBlock(text, selection: textView.selectedRange())
+        else { return false }
+        textView.setSelectedRange(fullLineRange(in: text, block: selected.range))
+        textView.cut(self)
+        return true
+    }
+
+    /// ⌘L (Monaco `expandLineSelection`): selects the logical lines the
+    /// selection covers (including trailing newlines); every repeat press
+    /// grows the selection one more line down. Selection-only.
+    func selectLine(in textView: NSTextView) {
+        let text = textView.string as NSString
+        guard text.length > 0 else { return }
+        let selection = textView.selectedRange()
+        let start = min(max(selection.location, 0), text.length)
+        let end = min(max(NSMaxRange(selection), start), text.length)
+        let span = fullLinesSpan(in: text, start: start, end: end)
+        if selection == span, NSMaxRange(span) < text.length {
+            // Repeat: extend the last line by one.
+            let next = text.lineRange(for: NSRange(location: NSMaxRange(span), length: 0))
+            textView.setSelectedRange(
+                NSRange(location: span.location, length: NSMaxRange(next) - span.location))
+        } else {
+            textView.setSelectedRange(span)
+        }
+    }
+
+    /// Full-lines span covering [start, end): from the start line's first
+    /// character through the end line's newline (or EOF).
+    private func fullLinesSpan(in text: NSString, start: Int, end: Int) -> NSRange {
+        let first = text.lineRange(for: NSRange(location: start, length: 0))
+        let probe = end > start ? end - 1 : start
+        let last = text.lineRange(for: NSRange(location: probe, length: 0))
+        return NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+    }
+
+    /// ⌘Enter / ⇧⌘Enter (Monaco `insertLineAfter` / `insertLineBefore`):
+    /// inserts an empty line below/above the lines the selection spans,
+    /// carrying the reference line's indent; the caret lands on the new
+    /// line. Works on empty lines and multi-line selections alike.
+    func insertLine(in textView: NSTextView, below: Bool) {
+        guard textView.isEditable, !textView.hasMarkedText() else { return }
+        let text = textView.string as NSString
+        let selection = textView.selectedRange()
+        // Full lines covering the selection. Plume's lineRange includes
+        // the trailing newline when the document has one there.
+        let full = text.lineRange(for: selection)
+        let hasTrailingNewline =
+            full.length > 0 && char(text, NSMaxRange(full) - 1) == "\n"
+        var lines = (text.substring(with: full) as NSString).components(separatedBy: "\n")
+        if hasTrailingNewline, !lines.isEmpty { lines.removeLast() }
+        let reference = below ? (lines.last ?? "") : (lines.first ?? "")
+        let indent = String(reference.prefix { $0 == " " || $0 == "\t" })
+        if below {
+            let insertAt = NSMaxRange(full) - (hasTrailingNewline ? 1 : 0)
+            replace(
+                in: textView,
+                range: NSRange(location: insertAt, length: 0),
+                with: "\n" + indent,
+                caret: insertAt + 1 + indent.count)
+        } else {
+            replace(
+                in: textView,
+                range: NSRange(location: full.location, length: 0),
+                with: indent + "\n",
+                caret: full.location + indent.count)
+        }
     }
 
     /// ⌃⌘↑ / ⌃⌘↓: moves the selection's lines one line up/down, keeping
@@ -369,6 +467,35 @@ extension EditorCoordinator {
     /// Whether the current grammar has comments (drives the menu item).
     var supportsComments: Bool {
         parent.syntax.commentStyle != .none
+    }
+
+    /// Whether a block comment pair exists (drives ⇧⌥A and the menu
+    /// item): the profile's explicit `blockComment`, else a `.block`
+    /// `commentStyle`. Languages with neither (JSON, bash) make the key
+    /// a no-op.
+    var supportsBlockComment: Bool { blockCommentPair != nil }
+
+    /// The effective block pair: ⇧⌥A prefers the explicit pair, falls
+    /// back to a block `commentStyle` (XML/HTML — where ⌘/ is block too),
+    /// nil when the grammar has no block form.
+    private var blockCommentPair: (open: String, close: String)? {
+        if let block = parent.syntax.blockComment {
+            return (block.open, block.close)
+        }
+        if case .block(let open, let close) = parent.syntax.commentStyle {
+            return (open, close)
+        }
+        return nil
+    }
+
+    /// ⇧⌥A (Monaco `blockComment`): wraps the selection in the block
+    /// pair / unwraps the surrounding pair. Returns whether anything
+    /// changed.
+    func toggleExplicitBlockComment(_ textView: NSTextView) -> Bool {
+        guard textView.isEditable, !textView.hasMarkedText(),
+            let pair = blockCommentPair
+        else { return false }
+        return toggleBlockComment(textView, open: pair.open, close: pair.close)
     }
 }
 

@@ -58,7 +58,7 @@ extension SyntaxProfile {
     /// (`client.test(...)`) emphasized as one function-name chain.
     /// Auto-pair table is the default set: `{` stays out so
     /// `{{variable}}` templates in scripts keep working. A trailing `:`
-    /// indents the next line; line comments continue.
+    /// indents the next line; line comments continue. `/* */` blocks.
     public static let javascript = SyntaxProfile(
         id: "javascript",
         language: { tree_sitter_javascript().map { Language($0) } },
@@ -67,7 +67,8 @@ extension SyntaxProfile {
         },
         commentStyle: .line(prefix: "// "),
         onEnterRules: [SyntaxProfile.OnEnterRule(pattern: ".*:\\s*$", action: .indent)],
-        continueLineComments: true)
+        continueLineComments: true,
+        blockComment: SyntaxProfile.BlockComment(open: "/*", close: "*/"))
 
     /// Shell: pipes and redirects stay plain, flags/keywords take the
     /// keyword color, strings and numbers the shared token colors,
@@ -92,7 +93,7 @@ extension SyntaxProfile {
     /// shared token colors, identifiers and member chains as one
     /// key-colored surface. `--` line comments.
     /// Auto-pairs `{ }` on top of the default set (table constructors);
-    /// no `{{` template token exists here to protect.
+    /// no `{{` template token exists here to protect. `--[[ ]]` blocks.
     public static let lua = SyntaxProfile(
         id: "lua",
         language: { tree_sitter_lua().map { Language($0) } },
@@ -107,5 +108,6 @@ extension SyntaxProfile {
             SyntaxProfile.OnEnterRule(pattern: ".*\\belse\\s*$", action: .indent),
             SyntaxProfile.OnEnterRule(pattern: ".*\\brepeat\\s*$", action: .indent),
         ],
-        continueLineComments: true)
+        continueLineComments: true,
+        blockComment: SyntaxProfile.BlockComment(open: "--[[", close: "]]"))
 }

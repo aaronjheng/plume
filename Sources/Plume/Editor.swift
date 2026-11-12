@@ -1887,6 +1887,9 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             editorCoordinator?.notifyReadOnlyAttempt()
             return
         }
+        if let coordinator = editorCoordinator, coordinator.deleteAutoPair(in: self) {
+            return
+        }
         super.deleteBackward(sender)
     }
 
@@ -1901,6 +1904,12 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     override func cut(_ sender: Any?) {
         guard isEditable else {
             editorCoordinator?.notifyReadOnlyAttempt()
+            return
+        }
+        if selectedRange().length == 0,
+            let coordinator = editorCoordinator,
+            coordinator.cutLine(in: self)
+        {
             return
         }
         super.cut(sender)
@@ -1944,6 +1953,14 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             if coordinator.toggleComment(self) { return true }
             return super.performKeyEquivalent(with: event)
         }
+        // ⇧⌥A: toggle block comment (Monaco blockComment). Editing-only;
+        // without a block pair it falls through.
+        if modifiers == [.shift, .option],
+            event.charactersIgnoringModifiers?.lowercased() == "a"
+        {
+            if coordinator.toggleExplicitBlockComment(self) { return true }
+            return super.performKeyEquivalent(with: event)
+        }
         // Smart select (⌃⇧⌘→ / ⌃⇧⌘←). Selection-only, so it
         // works on read-only editors too - hence ahead of the editable
         // guard below.
@@ -1977,6 +1994,12 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             event.charactersIgnoringModifiers?.lowercased() == "d"
         {
             coordinator.selectPreviousMatch(in: self)
+            return true
+        }
+        // ⌘L: select the current line (Monaco expandLineSelection);
+        // repeat presses grow the selection one line down.
+        if modifiers == [.command], event.charactersIgnoringModifiers == "l" {
+            coordinator.selectLine(in: self)
             return true
         }
         // ⌥⌘G: toggle find-in-selection, capturing the live selection.
@@ -2023,6 +2046,14 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.parent.find.visible
         {
             coordinator.performFindAction(.replaceAll, in: self)
+            return true
+        }
+        // ⌘Enter / ⇧⌘Enter: insert an empty line below/above the
+        // selection's lines (Monaco insertLineAfter/insertLineBefore).
+        if event.keyCode == 36 || event.keyCode == 76,
+            modifiers == [.command] || modifiers == [.command, .shift]
+        {
+            coordinator.insertLine(in: self, below: modifiers == [.command])
             return true
         }
         if modifiers == [.command], event.charactersIgnoringModifiers == "d" {
@@ -2117,6 +2148,19 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             }
         }
         super.mouseDown(with: event)
+    }
+
+    /// ⌘C. With an empty selection (Monaco `clipboardCopyAction`) the
+    /// current line goes to the pasteboard instead (with its trailing
+    /// newline); a selection keeps the stock copy.
+    override func copy(_ sender: Any?) {
+        if selectedRange().length == 0,
+            let coordinator = editorCoordinator,
+            coordinator.copyLine(in: self)
+        {
+            return
+        }
+        super.copy(sender)
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -3143,6 +3187,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         menu.addItem(.separator())
         item("Format", "f", [.option, .shift], #selector(menuFormat), editable && coordinator.canFormat(self))
         item("Toggle Comment", "/", [.command], #selector(menuToggleComment), editable && coordinator.supportsComments)
+        item(
+            "Toggle Block Comment", "a", [.option, .shift], #selector(menuToggleBlockComment), editable && coordinator.supportsBlockComment)
         menu.addItem(.separator())
         item("Duplicate Lines", "d", [.command], #selector(menuDuplicateLines), editable)
         item("Delete Lines", "k", [.command, .shift], #selector(menuDeleteLines), editable)
@@ -3201,6 +3247,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
 
     @objc private func menuFormat() { _ = editorCoordinator?.applyFormat(self) }
     @objc private func menuToggleComment() { _ = editorCoordinator?.toggleComment(self) }
+    @objc private func menuToggleBlockComment() { _ = editorCoordinator?.toggleExplicitBlockComment(self) }
     @objc private func menuDuplicateLines() { editorCoordinator?.duplicateLines(in: self) }
     @objc private func menuDeleteLines() { editorCoordinator?.deleteLines(in: self) }
     @objc private func menuDeleteToLineEnd() { editorCoordinator?.deleteToLineEnd(in: self) }
@@ -4229,6 +4276,34 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         return skippers
     }
 
+    /// Backspace between an auto-paired empty pair deletes both
+    /// characters (Monaco deleteLeft for matched pairs). Only pairs from
+    /// the active table count - a stray closer never falls out of the
+    /// document with its opener. Works on selection-free carets only.
+    func deleteAutoPair(in textView: NSTextView) -> Bool {
+        guard parent.enablesAutoPairing, !textView.hasMarkedText(),
+            textView.isEditable
+        else { return false }
+        // Languages that opted out of pairing delete one char at a time.
+        if parent.syntax.autoClosing == .never { return false }
+        let openers = effectiveOpeners
+        let selection = textView.selectedRange()
+        guard selection.length == 0 else { return false }
+        let text = textView.string as NSString
+        let caret = selection.location
+        guard caret > 0, caret < text.length,
+            let before = char(text, caret - 1),
+            let after = char(text, caret),
+            let closer = openers[before], closer == after
+        else { return false }
+        replace(
+            in: textView,
+            range: NSRange(location: caret - 1, length: 2),
+            with: "",
+            caret: caret - 1)
+        return true
+    }
+
     /// Bracket/quote smart insertion for a typed character. Consumes the
     /// keystroke (true) for skip-over, pairing, and selection wrap;
     /// anything else falls through to the standard insertion.
@@ -4556,7 +4631,7 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
 
     /// Block comments: wrap the selection (or the caret), or unwrap the
     /// comment surrounding the selection. Tokens come from the profile.
-    private func toggleBlockComment(_ textView: NSTextView, open openToken: String, close closeToken: String) -> Bool {
+    func toggleBlockComment(_ textView: NSTextView, open openToken: String, close closeToken: String) -> Bool {
         let text = textView.string as NSString
         let selection = textView.selectedRange()
         let caret = min(selection.location, text.length)
