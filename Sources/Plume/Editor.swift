@@ -1979,6 +1979,14 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.selectPreviousMatch(in: self)
             return true
         }
+        // ⌥⌘G: toggle find-in-selection, capturing the live selection.
+        // Navigation-only: works on read-only editors like the find keys.
+        if modifiers == [.command, .option],
+            event.charactersIgnoringModifiers?.lowercased() == "g"
+        {
+            coordinator.performFindAction(.toggleInSelection, in: self)
+            return true
+        }
         guard isEditable || Self.isNavigationEquivalent(event: event, modifiers: modifiers) else {
             return super.performKeyEquivalent(with: event)
         }
@@ -1998,7 +2006,8 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             coordinator.performFindAction(.previous, in: self)
             return true
         }
-        if modifiers == [.command, .shift], event.keyCode == 43 {
+        // ⌘⇧\: jump to the matching bracket (Monaco `jumpToBracket`).
+        if modifiers == [.command, .shift], event.keyCode == 42 {
             coordinator.jumpToMatchingBracket(in: self)
             return true
         }

@@ -177,6 +177,74 @@ fall back to neutral system defaults.
 
 Colors stay dynamic (light/dark adaptive) after the one-time install.
 
+## Keyboard shortcuts
+
+All bindings are editor-local (they fire while the editor has focus) and
+follow Monaco's conventions where they fit macOS. Navigation bindings stay
+live in read-only editors; the editing ones need editability.
+
+**Find & replace**
+
+| Shortcut | Action |
+|---|---|
+| ⌘F / ⌘⌥F | Open find / find with the replace row |
+| ⌘G / ⌘⇧G | Next / previous match (retained after the bar is dismissed) |
+| ⌘⌥Enter / ⌘⌥⇧Enter | Replace current / replace all (while the bar is up) |
+| ⌘⌥E | Use selection for find |
+| ⌥⌘G | Toggle find-in-selection, capturing the live selection |
+| ↑ / ↓ | Recall query history (find and replace fields) |
+| Enter | Next match (find field) / replace current (replace field) |
+| Esc | Close the bar |
+
+**Go to & navigation**
+
+| Shortcut | Action |
+|---|---|
+| ⌥⌘L | Go to line: `12` or `12:5` |
+| F12 / ⌘F12 / ⌥F12 | Go to definition |
+| ⌘-click | Go to definition |
+| ⌃⇧O | Document symbols (outline) |
+| ⌃⇧Space | Signature help |
+| F8 / ⇧F8 | Next / previous diagnostic |
+| ⌃⌘D / ⌃⌘⇧D | Select next / previous occurrence of the word or selection |
+| ⌃⇧⌘→ / ⌃⇧⌘← | Smart select: expand / shrink across the tree-sitter node ancestry |
+| ⌘⇧\ | Jump to the matching bracket |
+
+**Lines & editing**
+
+| Shortcut | Action |
+|---|---|
+| ⌘D | Duplicate lines |
+| ⌘⇧K | Delete lines |
+| ⌃⌘↑ / ⌃⌘↓ | Move lines up / down |
+| ⌥⇧↑ / ⌥⇧↓ | Copy lines up / down |
+| ⌃K | Delete to line end |
+| ⌘⌫ | Delete to the logical line's start |
+| ⌘/ | Toggle line comment |
+| Tab / ⇧Tab | Block indent / outdent (⌘] / ⌘[ work too) |
+| ⌃T | Transpose characters |
+| → | Hop past a closing bracket/quote the caret sits before |
+| Esc | Dismiss completions, then signature help, then the find bar |
+
+**Formatting**
+
+| Shortcut | Action |
+|---|---|
+| ⌥⇧F | Format the selection, else the document |
+| ⌥⇧⌘V | Paste and format |
+| ⌘V | Formats the pasted text when `formatOnPaste` is on |
+
+**Zoom & wrap**
+
+| Shortcut | Action |
+|---|---|
+| ⌃= / ⌃- / ⌃0 | Editor-local zoom in / out / reset (⌃+wheel zooms too) |
+| ⌥Z | Toggle word wrap |
+
+Mouse extras: middle-click pastes the find clipboard at the clicked
+position. Host-registered `actions` may carry their own key equivalents,
+matched by exact modifiers.
+
 ## Non-goals
 
 Minimap, code folding, multi-cursor, and a full decoration API are deliberate
