@@ -2294,26 +2294,29 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
 
     private var nsStringLength: Int { (string as NSString).length }
 
-    /// Custom draw pass: the caret line's band, the indent guides, and
-    /// the whitespace markers, all painted UNDER the text (the view's
-    /// background is transparent, so the fills show through).
-    /// `EditorTheme.debugDisableCustomDrawing` is the diagnostic switch
-    /// that skips all of it and renders text only.
+    /// Custom draw pass: the background and the caret line's band first,
+    /// then super.draw (selection wash + glyphs), then the under-text
+    /// decorations that must stay visible through the (opaque) selection
+    /// wash - the indent/bracket guides and whitespace markers, drawn at
+    /// low alpha over everything (they live in whitespace columns, so
+    /// they never cross glyph ink) - then the remaining over-text
+    /// overlays. `EditorTheme.debugDisableCustomDrawing` is the
+    /// diagnostic switch that skips all of it and renders text only.
     override func draw(_ dirtyRect: NSRect) {
         if EditorTheme.debugDisableCustomDrawing {
             super.draw(dirtyRect)
             return
         }
         // Paint the background first: `drawsBackground` is false so AppKit
-        // does not repaint it over the under-text decorations. Background
-        // is skipped in the debug path, where `super.draw` still paints it.
+        // does not repaint it over the decorations. Background is skipped
+        // in the debug path, where `super.draw` still paints it.
         backgroundColor.setFill()
         dirtyRect.fill()
         drawLineBand()
+        super.draw(dirtyRect)
         drawIndentGuides(dirtyRect: dirtyRect)
         drawBracketGuides(dirtyRect: dirtyRect)
         drawWhitespace(dirtyRect: dirtyRect)
-        super.draw(dirtyRect)
         drawRulers(dirtyRect: dirtyRect)
         drawControlCharacters(dirtyRect: dirtyRect)
         drawColorDecorators(dirtyRect: dirtyRect)
@@ -2354,7 +2357,11 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             !coordinator.parent.rulers.isEmpty
         else { return }
         let spaceWidth = coordinator.spaceWidth(for: font ?? Self.fallbackFont)
-        let baseX = textContainerOrigin.x + Editor.fragmentPadding
+        // Same anchor as the text cells (`lineFragmentPadding` is zero):
+        // column n's hairline sits at the LEFT EDGE of cell n - 1, so
+        // `rulers: [80]` on a 4-space body lands on the first character
+        // past the margin, matching editor conventions.
+        let baseX = textContainerOrigin.x
         let color = EditorTheme.textPrimaryNS.withAlphaComponent(0.25)
         color.setFill()
         let top = dirtyRect.minY
@@ -2574,9 +2581,10 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     }
 
     /// Vertical guides spanning bracket pairs: for every pair whose opener and closer are
-    /// in the laid-out range, a faint hairline at the opener's column on
-    /// each line strictly between the pair's lines, tinted with the
-    /// pair's depth color. Background layer, beside the indent guides.
+    /// in the laid-out range, a faint hairline at the opener's indent column
+    /// on each line from the opener line up to (not including) the closer
+    /// line - the bar stops above the closing bracket's row - in the same
+    /// neutral paint as the indent guides. Background layer, beside them.
     private func drawBracketGuides(dirtyRect: NSRect) {
         guard let coordinator = editorCoordinator, coordinator.parent.bracketGuides,
             let layoutManager, let container = textContainer, !string.isEmpty
@@ -2611,54 +2619,83 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             }
         }
         guard !pairs.isEmpty else { return }
-        let palette: [NSColor] = [
-            .systemBlue, .systemPurple, .systemTeal,
-            .systemOrange, .systemGreen, .systemPink,
-        ]
+        let tabSize = max(coordinator.indent.tabSize, 1)
+        let spaceWidth = coordinator.spaceWidth(for: font ?? Self.fallbackFont)
+        let unitWidth = spaceWidth * CGFloat(tabSize)
+        let baseX = textContainerOrigin.x
+        // Same neutral paint as the indent guides: VS Code's guides are
+        // subtle monochrome lines, not per-depth colored ones.
+        let neutralColor = EditorTheme.textPrimaryNS.withAlphaComponent(0.15)
         let bounding = dirtyRect.offsetBy(
             dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
         let glyphRange = layoutManager.glyphRange(forBoundingRect: bounding, in: container)
         let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
         guard charRange.length > 0 else { return }
-        for pair in pairs where pair.depth > 0 {
-            // The opener's column: same x on every monospace line.
-            let openGlyph = layoutManager.glyphIndexForCharacter(at: pair.open)
-            var openFragmentGlyphs = NSRange()
-            let openFragment = layoutManager.lineFragmentRect(
-                forGlyphAt: openGlyph, effectiveRange: &openFragmentGlyphs)
-            let openChars = layoutManager.characterRange(
-                forGlyphRange: openFragmentGlyphs, actualGlyphRange: nil)
-            guard openChars.length > 0 else { continue }
-            let columnX =
-                openFragment.minX + textContainerOrigin.x
-                + CGFloat(pair.open - openChars.location) / CGFloat(openChars.length)
-                * openFragment.width
-            let color = palette[(pair.depth - 1) % palette.count].withAlphaComponent(0.3)
-            color.setFill()
-            // Every laid-out fragment strictly between the pair's lines.
-            var index = charRange.location
-            let end = NSMaxRange(charRange)
-            while index < end {
-                var fragmentGlyphs = NSRange()
-                let fragment = layoutManager.lineFragmentRect(
-                    forGlyphAt: index, effectiveRange: &fragmentGlyphs)
-                let fragmentChars = layoutManager.characterRange(
-                    forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
-                guard fragmentChars.location < length else { break }
-                let openLine = ns.lineRange(for: NSRange(location: pair.open, length: 0))
-                let closeLine = ns.lineRange(for: NSRange(location: pair.close, length: 0))
-                let fragmentLine = ns.lineRange(
-                    for: NSRange(location: fragmentChars.location, length: 0))
-                if fragmentLine.location > NSMaxRange(openLine),
-                    NSMaxRange(fragmentLine) < closeLine.location + closeLine.length
-                {
-                    NSRect(
-                        x: columnX, y: fragment.minY + textContainerOrigin.y,
-                        width: 1, height: fragment.height
-                    ).fill()
+        // Monaco `guides.bracketPairs: "active"`: ONE bar, for the
+        // innermost pair whose bracket lines contain the caret's line.
+        let caretRange = selectedRange()
+        let caretLine = ns.lineRange(
+            for: NSRange(location: min(max(caretRange.location, 0), length), length: 0))
+        func containsCaretLine(_ pair: BracketPair) -> Bool {
+            let openLine = ns.lineRange(for: NSRange(location: pair.open, length: 0))
+            let closeLine = ns.lineRange(for: NSRange(location: pair.close, length: 0))
+            return caretLine.location >= openLine.location
+                && caretLine.location < NSMaxRange(closeLine)
+        }
+        guard
+            let active =
+                pairs
+                .filter({ $0.depth > 0 && containsCaretLine($0) })
+                .min(by: { ($1.close - $1.open) < ($0.close - $0.open) })
+        else { return }
+        // The opener's indent column on the SAME grid as the indent
+        // guides: the leading whitespace of the opener's line, walked
+        // unit by unit.
+        let openLine = ns.lineRange(for: NSRange(location: active.open, length: 0))
+        let closeLine = ns.lineRange(for: NSRange(location: active.close, length: 0))
+        let openLead = ns.substring(with: openLine).prefix(while: { $0 == " " || $0 == "\t" })
+        var openTotal = 0
+        var spaces = 0
+        for character in openLead {
+            switch character {
+            case " ":
+                spaces += 1
+                if spaces >= tabSize {
+                    spaces = 0
+                    openTotal += 1
                 }
-                index = NSMaxRange(fragmentGlyphs)
+            case "\t":
+                spaces = 0
+                openTotal += 1
+            default:
+                break
             }
+        }
+        let columnX = (baseX + CGFloat(openTotal) * unitWidth).rounded()
+        neutralColor.setFill()
+        // Every laid-out fragment STRICTLY between the bracket lines: the
+        // bar touches neither the opener nor the closer row (VS Code's
+        // bracket-pair guides).
+        var index = charRange.location
+        let end = NSMaxRange(charRange)
+        while index < end {
+            var fragmentGlyphs = NSRange()
+            let fragment = layoutManager.lineFragmentRect(
+                forGlyphAt: index, effectiveRange: &fragmentGlyphs)
+            let fragmentChars = layoutManager.characterRange(
+                forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
+            guard fragmentChars.location < length else { break }
+            let fragmentLine = ns.lineRange(
+                for: NSRange(location: fragmentChars.location, length: 0))
+            if fragmentLine.location > NSMaxRange(openLine),
+                fragmentLine.location < closeLine.location
+            {
+                NSRect(
+                    x: columnX, y: fragment.minY + textContainerOrigin.y,
+                    width: 1, height: fragment.height
+                ).fill()
+            }
+            index = NSMaxRange(fragmentGlyphs)
         }
     }
 
@@ -2970,12 +3007,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     }
 
     /// Faint vertical guides at every completed indent level of each
-    /// visible line fragment. The leading
-    /// whitespace is walked unit by unit against the configured `tabSize`:
-    /// every `tabSize` spaces - or a literal tab, which renders at
-    /// `tabSize` columns via the default paragraph style - completes one
-    /// level. Mixed space/tab indentation tracks the actual glyph runs.
-    /// Wrapped continuations carry no leading whitespace and get none.
+    /// visible line fragment, drawn VS Code-style: one pixel-aligned bar
+    /// per level at the indent column (`baseX + level * spaceWidth *
+    /// tabSize`), spanning every line reaching the level. The leading
+    /// whitespace is walked unit by unit against the configured
+    /// `tabSize`: every `tabSize` spaces - or a literal tab, which
+    /// renders at `tabSize` columns - completes one level. Wrapped
+    /// continuations carry no leading whitespace and get none.
     private func drawIndentGuides(dirtyRect: NSRect) {
         guard let coordinator = editorCoordinator, coordinator.parent.indentGuides,
             let layoutManager = layoutManager, let container = textContainer,
@@ -3018,52 +3056,63 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                 location: charRange.location,
                 length: min(charRange.length, length - charRange.location))
             guard clamped.length > 0 else { break }
-            // Walk the leading whitespace run: the cursor advances one
-            // space width per space (a boundary completes every
-            // `tabSize`) or one unit width per tab, and a guide is drawn
-            // at each completed boundary. Capped at 12 levels
-            // (deep-indent guard). Guides are drawn as one continuous
-            // bar per level spanning every line that reaches it, so
-            // blocks read as a single line instead of per-row ticks.
-            // The bar's X is the actual left edge of the line's first
-            // non-whitespace glyph (not a space-width accumulation),
-            // so it sits flush against the text at that indent level.
-            let leadCount = nsString.substring(with: clamped).prefix(while: { $0 == " " || $0 == "\t" }).count
-            let firstContentChar = charRange.location + leadCount
-            var textLeftX: CGFloat?
-            if firstContentChar < length {
-                let glyph = layoutManager.glyphIndexForCharacter(at: firstContentChar)
-                var glyphRange = NSRange()
-                let fragmentRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &glyphRange)
-                let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-                textLeftX = glyphRect.minX + textContainerOrigin.x
-                _ = fragmentRect
-            }
-            // First count the completed levels on this line so each
-            // level's bar can sit on its own column: level k sits
-            // `(total - k)` indent units left of the text - one bar
-            // per level.
+            // Guides at completed indent boundaries on a uniform grid:
+            // level k sits at `baseX + k * unitWidth`, pixel-aligned.
+            // baseX anchors on the CONTAINER origin — the same origin the
+            // text cells start from (`lineFragmentPadding` is zeroed at
+            // setup), with NO extra padding: an added inset shifts every
+            // bar off the column it names. rulers use the same anchor
+            // plus their own padding for their column semantics.
+            // Spans merge across every line reaching the level, so each
+            // block shows a continuous bar per level. The boundary at
+            // the content column (k == total) gets a bar too - it is the
+            // block edge. Capped at 12 levels.
+            let baseX = textContainerOrigin.x
             var total = 0
-            do {
-                var spaces = 0
-                for character in nsString.substring(with: clamped) {
-                    switch character {
-                    case " ":
-                        spaces += 1
-                        if spaces >= tabSize {
-                            spaces = 0
-                            total += 1
-                        }
-                    case "\t":
-                        spaces = 0
+            var spacesSeen = 0
+            precount: for character in nsString.substring(with: clamped) {
+                switch character {
+                case " ":
+                    spacesSeen += 1
+                    if spacesSeen >= tabSize {
+                        spacesSeen = 0
                         total += 1
-                    default:
-                        break
                     }
+                case "\t":
+                    spacesSeen = 0
+                    total += 1
+                default:
+                    break precount
                 }
+                if total >= 12 { break }
             }
             var levels = 0
             var spacesInUnit = 0
+            let lineY = fragment.minY + textContainerOrigin.y
+            let lineHeight = fragment.height
+            // Fragment top → ink top: the line box piles leading above
+            // the glyphs. Bars span the FULL line boxes of every line
+            // reaching the level, from the first one's fragment top
+            // through the last one's fragment bottom - no trims, no
+            // extensions (Monaco's guides do the same).
+            func noteGuide(_ level: Int) {
+                guard level <= 12 else { return }
+                // AT the level's content column (Monaco `guides.
+                // indentation`): the bar hugs the characters that start
+                // each indent level.
+                let guideX = (baseX + CGFloat(level - 1) * unitWidth).rounded()
+                if let known = live[level] {
+                    var span = known
+                    span.minY = min(span.minY, lineY)
+                    span.maxY = max(span.maxY, lineY + lineHeight)
+                    live[level] = span
+                } else {
+                    live[level] = GuideSpan(
+                        guideX: guideX,
+                        minY: lineY,
+                        maxY: lineY + lineHeight)
+                }
+            }
             scan: for character in nsString.substring(with: clamped) {
                 switch character {
                 case " ":
@@ -3071,44 +3120,12 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                     if spacesInUnit >= tabSize {
                         spacesInUnit = 0
                         levels += 1
-                        let guideX =
-                            textLeftX.map { $0 - CGFloat(total - levels) * unitWidth }
-                            ?? (fragment.minX + textContainerOrigin.x + Editor.fragmentPadding + CGFloat(levels) * unitWidth)
-                        if levels <= 12 {
-                            if let known = live[levels] {
-                                var span = known
-                                span.minY = min(span.minY, fragment.minY + textContainerOrigin.y)
-                                span.maxY = max(span.maxY, fragment.minY + textContainerOrigin.y + fragment.height)
-                                live[levels] = span
-                            } else {
-                                live[levels] = GuideSpan(
-                                    guideX: guideX,
-                                    minY: fragment.minY + textContainerOrigin.y,
-                                    maxY: fragment.minY + textContainerOrigin.y + fragment.height
-                                )
-                            }
-                        }
+                        noteGuide(levels)
                     }
                 case "\t":
                     spacesInUnit = 0
                     levels += 1
-                    let guideX =
-                        textLeftX.map { $0 - CGFloat(total - levels) * unitWidth }
-                        ?? (fragment.minX + textContainerOrigin.x + Editor.fragmentPadding + CGFloat(levels) * unitWidth)
-                    if levels <= 12 {
-                        if let known = live[levels] {
-                            var span = known
-                            span.minY = min(span.minY, fragment.minY + textContainerOrigin.y)
-                            span.maxY = max(span.maxY, fragment.minY + textContainerOrigin.y + fragment.height)
-                            live[levels] = span
-                        } else {
-                            live[levels] = GuideSpan(
-                                guideX: guideX,
-                                minY: fragment.minY + textContainerOrigin.y,
-                                maxY: fragment.minY + textContainerOrigin.y + fragment.height
-                            )
-                        }
-                    }
+                    noteGuide(levels)
                 default:
                     break scan
                 }
@@ -3121,17 +3138,6 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         for span in runs {
             NSRect(x: span.guideX, y: span.minY, width: 1, height: span.maxY - span.minY).fill()
         }
-    }
-
-    /// One vertical hairline for a completed indent level, spanning the
-    /// fragment's height.
-    private func drawIndentGuide(at guideX: CGFloat, fragment: CGRect) {
-        NSRect(
-            x: guideX,
-            y: fragment.minY + textContainerOrigin.y,
-            width: 1,
-            height: fragment.height
-        ).fill()
     }
 
     /// Recomputes the caret line's band and invalidates the old and new
