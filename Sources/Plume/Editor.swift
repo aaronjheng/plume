@@ -2421,11 +2421,18 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                     color = nil
                 }
                 guard let color else { continue }
-                let fraction = CGFloat(position) / CGFloat(lineLength)
+                // The box spans the unit's own glyph cell (see the
+                // whitespace-draw note: fraction-based x drifts across
+                // the container width).
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: offset)
+                let glyphX = layoutManager.location(forGlyphAt: glyphIndex).x + textContainerOrigin.x
+                let nextGlyphX =
+                    layoutManager.location(forGlyphAt: min(glyphIndex + 1, layoutManager.numberOfGlyphs)).x
+                    + textContainerOrigin.x
                 let box = CGRect(
-                    x: lineFragment.minX + textContainerOrigin.x + fraction * lineFragment.width,
+                    x: glyphX,
                     y: lineFragment.minY + textContainerOrigin.y,
-                    width: max(lineFragment.width / CGFloat(lineLength), 3),
+                    width: max(nextGlyphX - glyphX, 3),
                     height: lineFragment.height)
                 color.setFill()
                 box.fill()
@@ -2457,14 +2464,9 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             var fragmentGlyphs = NSRange()
             let fragment = layoutManager.lineFragmentRect(
                 forGlyphAt: glyphIndex, effectiveRange: &fragmentGlyphs)
-            let fragmentChars = layoutManager.characterRange(
-                forGlyphRange: fragmentGlyphs, actualGlyphRange: nil)
-            let lineLength = max(fragmentChars.length, 1)
-            let fraction = CGFloat(token.location - fragmentChars.location) / CGFloat(lineLength)
+            let tokenX = layoutManager.location(forGlyphAt: glyphIndex).x + textContainerOrigin.x
             let swatch = NSRect(
-                x: max(
-                    fragment.minX + textContainerOrigin.x + fraction * fragment.width - 13,
-                    textContainerOrigin.x),
+                x: max(tokenX - 13, textContainerOrigin.x),
                 y: fragment.minY + textContainerOrigin.y + 3,
                 width: 10,
                 height: max(fragment.height - 6, 6))
@@ -2991,12 +2993,13 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                     show = false
                 }
                 guard show else { continue }
-                // Proportional position within the fragment: monospace font,
-                // so character fraction == x fraction (good enough for a
-                // 2pt marker; avoids per-glyph lookup churn).
-                let fraction = CGFloat(offset - charRange.location) / CGFloat(max(line.length, 1))
+                // The dot sits at the whitespace unit's own glyph origin:
+                // lineFragment.width is the full container width, so the
+                // old fraction-based x spread the dots across the whole
+                // row instead of the text span.
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: offset)
                 let marker = CGRect(
-                    x: lineFragment.minX + textContainerOrigin.x + fraction * lineFragment.width,
+                    x: layoutManager.location(forGlyphAt: glyphIndex).x + textContainerOrigin.x,
                     y: lineFragment.minY + textContainerOrigin.y + lineFragment.height / 2 - 1,
                     width: 2,
                     height: 2)
