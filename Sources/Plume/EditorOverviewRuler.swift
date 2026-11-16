@@ -1,22 +1,25 @@
 import AppKit
 import SwiftUI
 
-/// The overview ruler: a narrow strip right
-/// of the text showing the whole document's markers at proportional
-/// heights - diagnostics in their severity color, find matches in the
-/// warning color, the caret line in the accent color - plus a subtle band
-/// for the visible viewport. Doubles as the scroll affordance the editor
-/// otherwise hides: click/drag scrolls proportionally.
+/// The overview ruler: a narrow strip right of the text. The selection
+/// wash and the caret-line band continue into it at their on-screen
+/// rows - mirrored live from the text view, so each reads as one
+/// continuous row across the strip's hairline. The strip also doubles
+/// as the scroll affordance the editor otherwise hides: a
+/// viewport-proportional slider; click/drag scrolls proportionally.
 ///
-/// Marks are content-anchored (offset/documentLength), so the view only
-/// redraws on edits, diagnostics, find, and layout changes - not per
-/// scroll tick.
+/// Redraws on scroll ticks, and via its own observers on the text view
+/// on selection changes and edits.
 final class EditorOverviewRulerView: NSView {
     static let width: CGFloat = 14
-    weak var textView: NSTextView?
+    weak var textView: NSTextView? {
+        didSet { installObservers() }
+    }
     weak var coordinator: EditorCoordinator?
 
     private var scrollObserver: NSObjectProtocol?
+    private var selectionObserver: NSObjectProtocol?
+    private var editObserver: NSObjectProtocol?
 
     override var isFlipped: Bool { true }
 
@@ -38,9 +41,34 @@ final class EditorOverviewRulerView: NSView {
         }
     }
 
+    /// The strip mirrors the text view's selection wash and caret band,
+    /// so it repaints from the text view's own notifications instead of
+    /// relying on the coordinator's invalidation paths - every selection
+    /// change and edit repaints the strip even if a wiring path misses.
+    private func installObservers() {
+        guard let textView, selectionObserver == nil else { return }
+        let center = NotificationCenter.default
+        selectionObserver = center.addObserver(
+            forName: NSTextView.didChangeSelectionNotification, object: textView, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.needsDisplay = true
+            }
+        }
+        editObserver = center.addObserver(
+            forName: NSText.didChangeNotification, object: textView, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.needsDisplay = true
+            }
+        }
+    }
+
     isolated deinit {
-        if let scrollObserver {
-            NotificationCenter.default.removeObserver(scrollObserver)
+        for observer in [scrollObserver, selectionObserver, editObserver] {
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
         }
     }
 
@@ -54,9 +82,12 @@ final class EditorOverviewRulerView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let safe = dirtyRect.intersection(bounds)
         guard !safe.isNull, safe.width > 0, safe.height > 0 else { return }
-        // Transparent: the caret-line band passes beneath the strip and
-        // the scrollbar elements (viewport band, ticks) draw on top of it
-        // (Monaco: the ruler overlays the content's right edge).
+        // Opaque code-background base: the strip sits over the text view's
+        // right edge, and anything the text view draws there (selection
+        // wash spilling past the container) must not show through. The
+        // ruler elements (hairline, ticks, slider) draw on top of it.
+        EditorTheme.codeBackgroundNS.setFill()
+        safe.fill()
         // Left hairline separating the ruler from the text (Monaco:
         // editorOverviewRuler.border, 30% gray).
         if showsBorder {
@@ -64,27 +95,73 @@ final class EditorOverviewRulerView: NSView {
             NSRect(x: bounds.minX, y: bounds.minY, width: 1, height: bounds.height).fill()
         }
 
-        guard let textView, let coordinator, bounds.height > 1 else { return }
-        let length = max((textView.string as NSString).length, 1)
-        let track = NSRect(x: bounds.minX + 3, y: bounds.minY + 1, width: bounds.width - 5, height: bounds.height - 2)
+        guard let textView, let coordinator, bounds.height > 1,
+            textView.window === window
+        else { return }
 
-        // Content-anchored y: offset/length maps linearly onto the track
-        // (monospace lines are uniform enough for 2px ticks).
-        func yFraction(_ offset: Int) -> CGFloat {
-            track.minY + CGFloat(min(max(offset, 0), length)) / CGFloat(length) * track.height
+        // The caret-line band and the selection wash CONTINUE into the
+        // strip at their on-screen rows: rects are converted straight
+        // from the text view's coordinates, so they read as one row
+        // across the hairline and track scrolling live (everything
+        // scrolled out of the viewport clips away). Content-anchored
+        // fraction mapping would be wrong here - it places a row by
+        // character offset, which drifts off the on-screen row as soon
+        // as line lengths differ. Draw order mirrors the text view:
+        // band first, wash over it. The slider below is backed by an
+        // opaque code-background fill, so it stays untinted.
+        if coordinator.parent.renderLineHighlight == .line
+            || coordinator.parent.renderLineHighlight == .all
+        {
+            let bandVisible =
+                !coordinator.parent.renderLineHighlightOnlyWhenFocus
+                || textView.window?.firstResponder === textView
+            if bandVisible, let editorText = textView as? EditorTextView,
+                !editorText.lineBandRect.isEmpty
+            {
+                let band = convert(editorText.lineBandRect, from: textView)
+                EditorTheme.lineHighlightBackgroundNS.setFill()
+                NSRect(x: bounds.minX, y: band.minY, width: bounds.width, height: band.height)
+                    .fill()
+                let borderWidth = EditorTheme.lineHighlightBorderWidth
+                if borderWidth > 0 {
+                    EditorTheme.lineHighlightBorderNS.setFill()
+                    NSRect(x: bounds.minX, y: band.minY, width: bounds.width, height: borderWidth)
+                        .fill()
+                    NSRect(
+                        x: bounds.minX, y: band.maxY - borderWidth,
+                        width: bounds.width, height: borderWidth
+                    ).fill()
+                }
+            }
         }
 
-        // Find matches: warning ticks (under the slider thumb).
-        let findColor = NSColor(EditorTheme.warning).withAlphaComponent(0.75)
-        findColor.setFill()
-        for range in coordinator.findMatches {
-            NSRect(x: track.minX, y: yFraction(range.location) - 1, width: track.width * 0.6, height: 2).fill()
-        }
-
-        // Diagnostics: severity ticks, drawn over find matches.
-        for entry in coordinator.diagnosticEntries {
-            entry.severity.nsColor.setFill()
-            NSRect(x: track.minX + track.width * 0.2, y: yFraction(entry.range.location) - 1, width: track.width * 0.8, height: 2).fill()
+        let selection = textView.selectedRange()
+        if selection.length > 0, let layoutManager = textView.layoutManager {
+            let wash =
+                (textView.selectedTextAttributes[.backgroundColor] as? NSColor)
+                ?? EditorTheme.selectionBackgroundNS
+                ?? NSColor.selectedContentBackgroundColor
+            // Union of the selected rows' line boxes (container coords -
+            // shift by the container origin to get text view coords).
+            var minY = CGFloat.greatestFiniteMagnitude
+            var maxY = -CGFloat.greatestFiniteMagnitude
+            layoutManager.enumerateLineFragments(
+                forGlyphRange: layoutManager.glyphRange(
+                    forCharacterRange: selection, actualCharacterRange: nil)
+            ) { fragment, _, _, _, _ in
+                let row = fragment.offsetBy(
+                    dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+                minY = min(minY, row.minY)
+                maxY = max(maxY, row.maxY)
+            }
+            if maxY > minY {
+                let rows = convert(
+                    NSRect(x: 0, y: minY, width: textView.bounds.width, height: maxY - minY),
+                    from: textView)
+                wash.setFill()
+                NSRect(x: bounds.minX, y: rows.minY, width: bounds.width, height: rows.height)
+                    .fill()
+            }
         }
 
         // Slider thumb LAST (Monaco draws the scrollbar over the ruler
@@ -105,6 +182,14 @@ final class EditorOverviewRulerView: NSView {
                     max((clipView.bounds.minY + viewportHeight) / documentHeight, 0), 1)
                 let thumbTop = top * bounds.height
                 let thumbHeight = max((bottom - top) * bounds.height, 20)
+                // Opaque backing under the translucent slider: the wash
+                // continues behind the strip, and without this the slider
+                // would pick it up and read tinted.
+                EditorTheme.codeBackgroundNS.setFill()
+                NSRect(
+                    x: bounds.minX, y: thumbTop,
+                    width: bounds.width, height: min(thumbHeight, bounds.height - thumbTop)
+                ).fill()
                 EditorTheme.scrollbarSliderNS.setFill()
                 NSRect(
                     x: bounds.minX, y: thumbTop,

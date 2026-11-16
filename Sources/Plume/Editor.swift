@@ -1487,7 +1487,9 @@ final class EditorClipView: NSClipView {
 final class EditorTextView: NSTextView, NSViewToolTipOwner {
     weak var editorCoordinator: EditorCoordinator?
     /// The current-line band's last drawn rect (for targeted invalidation).
-    private var lineBandRect: NSRect = .zero
+    /// The caret line's band, in text view coordinates. Written by
+    /// `refreshLineBand`; the overview ruler mirrors it into the strip.
+    private(set) var lineBandRect: NSRect = .zero
     /// The registered tooltip rect's tag + the bounds it covers (re-registered
     /// when the view grows, so hovers work over newly revealed content).
     private var tooltipTag: NSView.ToolTipTag?
@@ -2337,15 +2339,25 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
             return
         }
         guard !lineBandRect.isEmpty else { return }
+        // Re-anchor the right edge to the view's LIVE width at draw time:
+        // the cached rect was computed from the fragments at selection-/
+        // edit-time, and AppKit's selection wash paints to the text view's
+        // full width - the band must be flush with it (the 6pt trailing
+        // inset would otherwise show as an unwashed strip on selected
+        // lines).
+        var band = lineBandRect
+        if bounds.maxX > band.maxX {
+            band.size.width = bounds.maxX - band.minX
+        }
         EditorTheme.lineHighlightBackgroundNS.setFill()
-        lineBandRect.fill()
+        band.fill()
         let borderWidth = EditorTheme.lineHighlightBorderWidth
         if borderWidth > 0 {
             EditorTheme.lineHighlightBorderNS.setStroke()
             // Border-box like Monaco: the stroke lies INSIDE the band's
             // total height (the 1.5 × fontSize box includes the border).
             let border = NSBezierPath(
-                rect: lineBandRect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
+                rect: band.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
             border.lineWidth = borderWidth
             border.stroke()
         }
@@ -3869,8 +3881,10 @@ final class EditorCoordinator: NSObject, NSTextViewDelegate, @preconcurrency NST
         updateBracketHighlight(in: textView)
         updateWordHighlight(in: textView)
         // Caret-line strip in the gutter (renderLineHighlight
-        // .gutter/.all) repaints with the caret.
+        // .gutter/.all) repaints with the caret; the overview ruler's
+        // selection/band strips repaint with it too.
         invalidateGutter()
+        rootView?.rulerView?.needsDisplay = true
         if let callback = parent.onSelectionChange {
             let selection = textView.selectedRange()
             let length = (textView.string as NSString).length
