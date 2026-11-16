@@ -1107,11 +1107,14 @@ struct EditorRepresentable: NSViewRepresentable {
         textView.textColor = EditorTheme.textPrimaryNS
         textView.insertionPointColor =
             EditorTheme.insertionPointColorNS ?? NSColor(EditorTheme.accent)
-        if let selectionBackground = EditorTheme.selectionBackgroundNS {
-            var attrs = textView.selectedTextAttributes
-            attrs[.backgroundColor] = selectionBackground
-            textView.selectedTextAttributes = attrs
-        }
+        // The selection wash is drawn by hand (see `drawSelectionWash`):
+        // AppKit's built-in wash stretches rows that are fully selected
+        // all the way to the editor's right edge, while the selection
+        // should hug the characters it covers. Neutralize the system
+        // wash and keep only the theme color for the hand-drawn one.
+        var selectionAttrs = textView.selectedTextAttributes
+        selectionAttrs[.backgroundColor] = NSColor.clear
+        textView.selectedTextAttributes = selectionAttrs
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -2315,6 +2318,7 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
         backgroundColor.setFill()
         dirtyRect.fill()
         drawLineBand()
+        drawSelectionWash()
         super.draw(dirtyRect)
         drawIndentGuides(dirtyRect: dirtyRect)
         drawBracketGuides(dirtyRect: dirtyRect)
@@ -2360,6 +2364,71 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
                 rect: band.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
             border.lineWidth = borderWidth
             border.stroke()
+        }
+    }
+
+    /// The selection wash, drawn by hand so every selected row hugs the
+    /// characters it covers. AppKit's built-in wash stretches rows that
+    /// are fully contained in the selection all the way to the editor's
+    /// right edge (the layout manager's glyph bounding box for a range
+    /// ending in a paragraph mark spans the container's full width),
+    /// which reads as a highlight over blank space. Rows fully selected
+    /// here wash from the row's first glyph to its last visible glyph
+    /// (the paragraph mark is trimmed off), partial rows hug exactly
+    /// the selected glyphs, and a selected empty row keeps a one-space
+    /// sliver so the block doesn't read as torn.
+    private func drawSelectionWash() {
+        let selection = selectedRange()
+        guard selection.length > 0, let layoutManager,
+            let container = textContainer
+        else { return }
+        let wash =
+            EditorTheme.selectionBackgroundNS
+            ?? NSColor.selectedTextBackgroundColor
+        let nsString = string as NSString
+        let spaceWidth = editorCoordinator?.spaceWidth(for: font ?? Self.fallbackFont) ?? 8
+        let selectedGlyphs = layoutManager.glyphRange(
+            forCharacterRange: selection, actualCharacterRange: nil)
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: selectedGlyphs
+        ) { [weak self] fragment, _, _, fragmentGlyphs, _ in
+            guard let self else { return }
+            let lo = max(fragmentGlyphs.location, selectedGlyphs.location)
+            let hi = min(NSMaxRange(fragmentGlyphs), NSMaxRange(selectedGlyphs))
+            guard hi > lo else { return }
+            let portion = NSRange(location: lo, length: hi - lo)
+            // Tight glyph box for this portion. The paragraph mark is
+            // excluded: its bounding box reaches the container's right
+            // edge, which is exactly the full-row stretch being replaced.
+            var visibleGlyphs = portion
+            let portionChars = layoutManager.characterRange(
+                forGlyphRange: portion, actualGlyphRange: nil)
+            if portionChars.length > 0,
+                nsString.character(at: NSMaxRange(portionChars) - 1) == unichar(0x0A)
+            {
+                let visibleChars = NSRange(
+                    location: portionChars.location, length: portionChars.length - 1)
+                if visibleChars.length > 0 {
+                    visibleGlyphs = layoutManager.glyphRange(
+                        forCharacterRange: visibleChars, actualCharacterRange: nil)
+                } else {
+                    // Selected empty row: a one-space sliver at row start.
+                    wash.setFill()
+                    NSRect(
+                        x: fragment.minX + textContainerOrigin.x,
+                        y: fragment.minY + textContainerOrigin.y,
+                        width: spaceWidth, height: fragment.height
+                    ).fill()
+                    return
+                }
+            }
+            let ink = layoutManager.boundingRect(forGlyphRange: visibleGlyphs, in: container)
+            wash.setFill()
+            NSRect(
+                x: ink.minX + textContainerOrigin.x,
+                y: fragment.minY + textContainerOrigin.y,
+                width: ink.width, height: fragment.height
+            ).fill()
         }
     }
 
@@ -3159,7 +3228,12 @@ final class EditorTextView: NSTextView, NSViewToolTipOwner {
     /// rects. Called on selection changes and after edits.
     func refreshLineBand() {
         let previous = lineBandRect
-        lineBandRect = Self.computeLineBand(for: self)
+        // Monaco hides the current-line highlight while the selection is
+        // non-empty (the caret line is selected; the box would fight the
+        // wash), so the band rect collapses to nothing until the caret
+        // stands alone again.
+        lineBandRect = selectedRange().length > 0
+            ? .zero : Self.computeLineBand(for: self)
         if previous != lineBandRect {
             setNeedsDisplay(previous.insetBy(dx: -2, dy: -2))
             setNeedsDisplay(lineBandRect.insetBy(dx: -2, dy: -2))

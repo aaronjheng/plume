@@ -1,12 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// The overview ruler: a narrow strip right of the text. The selection
-/// wash and the caret-line band continue into it at their on-screen
-/// rows - mirrored live from the text view, so each reads as one
-/// continuous row across the strip's hairline. The strip also doubles
-/// as the scroll affordance the editor otherwise hides: a
-/// viewport-proportional slider; click/drag scrolls proportionally.
+/// The overview ruler: a narrow strip right of the text. The caret-line
+/// band continues into it at its on-screen row - mirrored live from the
+/// text view so it reads as one row across the strip's hairline. The
+/// strip also doubles as the scroll affordance the editor otherwise
+/// hides: a viewport-proportional slider; click/drag scrolls
+/// proportionally.
 ///
 /// Redraws on scroll ticks, and via its own observers on the text view
 /// on selection changes and edits.
@@ -99,16 +99,14 @@ final class EditorOverviewRulerView: NSView {
             textView.window === window
         else { return }
 
-        // The caret-line band and the selection wash CONTINUE into the
-        // strip at their on-screen rows: rects are converted straight
-        // from the text view's coordinates, so they read as one row
-        // across the hairline and track scrolling live (everything
-        // scrolled out of the viewport clips away). Content-anchored
-        // fraction mapping would be wrong here - it places a row by
-        // character offset, which drifts off the on-screen row as soon
-        // as line lengths differ. Draw order mirrors the text view:
-        // band first, wash over it. The slider below is backed by an
-        // opaque code-background fill, so it stays untinted.
+        // The caret-line band CONTINUES into the strip at its on-screen
+        // row: the band rect is converted straight from the text view's
+        // coordinates, so it reads as one row across the hairline and
+        // tracks scrolling live (scrolled out of the viewport it clips
+        // away). The selection itself is not mirrored: it hugs the
+        // characters (see `drawSelectionWash`), so there is no full-width
+        // row to continue. The slider below is backed by an opaque
+        // code-background fill, so it stays untinted.
         if coordinator.parent.renderLineHighlight == .line
             || coordinator.parent.renderLineHighlight == .all
         {
@@ -132,35 +130,6 @@ final class EditorOverviewRulerView: NSView {
                         width: bounds.width, height: borderWidth
                     ).fill()
                 }
-            }
-        }
-
-        let selection = textView.selectedRange()
-        if selection.length > 0, let layoutManager = textView.layoutManager {
-            let wash =
-                (textView.selectedTextAttributes[.backgroundColor] as? NSColor)
-                ?? EditorTheme.selectionBackgroundNS
-                ?? NSColor.selectedContentBackgroundColor
-            // Union of the selected rows' line boxes (container coords -
-            // shift by the container origin to get text view coords).
-            var minY = CGFloat.greatestFiniteMagnitude
-            var maxY = -CGFloat.greatestFiniteMagnitude
-            layoutManager.enumerateLineFragments(
-                forGlyphRange: layoutManager.glyphRange(
-                    forCharacterRange: selection, actualCharacterRange: nil)
-            ) { fragment, _, _, _, _ in
-                let row = fragment.offsetBy(
-                    dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
-                minY = min(minY, row.minY)
-                maxY = max(maxY, row.maxY)
-            }
-            if maxY > minY {
-                let rows = convert(
-                    NSRect(x: 0, y: minY, width: textView.bounds.width, height: maxY - minY),
-                    from: textView)
-                wash.setFill()
-                NSRect(x: bounds.minX, y: rows.minY, width: bounds.width, height: rows.height)
-                    .fill()
             }
         }
 
