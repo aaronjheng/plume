@@ -107,6 +107,17 @@ final class EditorOverviewRulerView: NSView {
         // characters (see `drawSelectionWash`), so there is no full-width
         // row to continue. The slider below is backed by an opaque
         // code-background fill, so it stays untinted.
+        //
+        // The row is clipped to `bounds` by hand: scrolled out of the
+        // viewport the converted rect runs negative (or past the strip's
+        // height), and AppKit does not clip NSView drawing to bounds under
+        // the hosted hierarchy - the fill and its two border lines painted
+        // over the chrome around the editor (the tab bar, the Send row).
+        func fillClipped(_ rect: NSRect) {
+            let visible = rect.intersection(bounds)
+            guard !visible.isNull, visible.width > 0, visible.height > 0 else { return }
+            visible.fill()
+        }
         if coordinator.parent.renderLineHighlight == .line
             || coordinator.parent.renderLineHighlight == .all
         {
@@ -118,17 +129,19 @@ final class EditorOverviewRulerView: NSView {
             {
                 let band = convert(editorText.lineBandRect, from: textView)
                 EditorTheme.lineHighlightBackgroundNS.setFill()
-                NSRect(x: bounds.minX, y: band.minY, width: bounds.width, height: band.height)
-                    .fill()
+                fillClipped(
+                    NSRect(x: bounds.minX, y: band.minY, width: bounds.width, height: band.height))
                 let borderWidth = EditorTheme.lineHighlightBorderWidth
                 if borderWidth > 0 {
                     EditorTheme.lineHighlightBorderNS.setFill()
-                    NSRect(x: bounds.minX, y: band.minY, width: bounds.width, height: borderWidth)
-                        .fill()
-                    NSRect(
-                        x: bounds.minX, y: band.maxY - borderWidth,
-                        width: bounds.width, height: borderWidth
-                    ).fill()
+                    fillClipped(
+                        NSRect(
+                            x: bounds.minX, y: band.minY, width: bounds.width,
+                            height: borderWidth))
+                    fillClipped(
+                        NSRect(
+                            x: bounds.minX, y: band.maxY - borderWidth,
+                            width: bounds.width, height: borderWidth))
                 }
             }
         }
