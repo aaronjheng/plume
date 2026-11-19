@@ -6,7 +6,10 @@ import SwiftUI
 /// text view so it reads as one row across the strip's hairline. The
 /// strip also doubles as the scroll affordance the editor otherwise
 /// hides: a viewport-proportional slider; click/drag scrolls
-/// proportionally.
+/// proportionally. On top of both sits the caret tick (Monaco's
+/// `hideCursorInOverviewRuler`): a short bar at the caret line's top on
+/// the same row the band continues into, so it reads as one marker.
+
 ///
 /// Redraws on scroll ticks, and via its own observers on the text view
 /// on selection changes and edits.
@@ -143,6 +146,50 @@ final class EditorOverviewRulerView: NSView {
                             x: bounds.minX, y: band.maxY - borderWidth,
                             width: bounds.width, height: borderWidth))
                 }
+            }
+        }
+
+        // Caret tick (Monaco `decorationsOverviewRuler`'s "Draw cursors"):
+        // one short bar per caret, anchored at the caret line's TOP IN
+        // SCREEN ROWS - the strip mirrors the band at its on-screen row (see
+        // above), so the tick rides along with that row and with scrolling,
+        // clipping away once the caret's line leaves the viewport. Caret
+        // color at 70% (Monaco tints `editorCursor.foreground` with 0.7),
+        // and off entirely under `hideCursorInOverviewRuler`. Height is
+        // Monaco's `2 * pixelRatio`.
+        if !hidesCursor, let layoutManager = textView.layoutManager,
+            let container = textView.textContainer
+        {
+            let nsString = textView.string as NSString
+            let caret = min(textView.selectedRange().location, nsString.length)
+            func caretLineTop() -> CGFloat? {
+                if caret == nsString.length, layoutManager.extraLineFragmentTextContainer != nil {
+                    return layoutManager.extraLineFragmentRect.minY
+                }
+                let lineRange = nsString.lineRange(for: NSRange(location: caret, length: 0))
+                let glyphs = layoutManager.glyphRange(
+                    forCharacterRange: lineRange, actualCharacterRange: nil)
+                guard glyphs.length > 0 else { return nil }
+                return layoutManager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+                    .minY
+            }
+            if let lineTop = caretLineTop() {
+                // Text view -> strip: the fragment rects start at the container
+                // origin (the inset the band carries too), and the conversion
+                // through the enclosing scroll view picks up the scroll offset
+                // the same way the band mirror does.
+                let top = convert(
+                    NSPoint(x: 0, y: lineTop + textView.textContainerOrigin.y), from: textView
+                ).y
+                // No edge clamp here (unlike Monaco's document-mapped tick):
+                // the row simply leaves the strip with the caret, and
+                // `fillClipped` drops it while it is off-screen.
+                let tickHeight: CGFloat = 2
+                coordinator.insertionColorNS.withAlphaComponent(0.7).setFill()
+                fillClipped(
+                    NSRect(
+                        x: bounds.minX, y: top - tickHeight / 2, width: bounds.width,
+                        height: tickHeight))
             }
         }
 
